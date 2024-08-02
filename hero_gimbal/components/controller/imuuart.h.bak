@@ -1,0 +1,31 @@
+#ifndef imuuart_h
+#define imuuart_h
+
+#include "main.h"
+#include "struct_typedef.h"
+
+//typedef struct{
+//union
+//	{
+//		uint8_t buff[4];
+//		float value;
+//	}imuyaw;
+//	union
+//	{
+//		uint8_t buff[4];
+//		float value;
+//	}imupitch;
+//	
+//	union
+//	{
+//		uint8_t buff[4];
+//		float value;
+//	}imuroll;
+//}imudata;
+//extern imudata imu_data;
+//extern uint8_t imubuff[14];
+
+
+//void imu_send(void);
+
+#endif

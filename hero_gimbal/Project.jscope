@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>
+<JScopeProject>
+    <FileVersion major="1" minor="1" />
+    <Project>
+        <Configuration>
+            <JLink>
+                <Options Connection="1" IsRTTSession="0" IsRTTWithTimeStamp="0" SamplingPeriod="100" SerialNo="0" JTAG_IRPre="0" JTAG_DRPre="0" IP="" TargetDevice="STM32F407IG" TargetInterface="SWD" InterfaceSpeed="4000" />
+            </JLink>
+            <ElfFile Name="C:\Users\15641\Desktop\hero - ÐÂ\hero2022-gimbal\hero2022-gimbal\MDK-ARM\hero_gimbal\hero_gimbal.axf" />
+            <Scope>
+                <Options TimeResolutionUs="1000000" />
+            </Scope>
+        </Configuration>
+        <Windows>
+            <Graph Show="1" />
+            <Watch Show="1" />
+        </Windows>
+        <SelectedSymbols>
+            <Symbol>
+                <Options Name="testset" Address="0x200002C8" Type="float" TypeID="1" Size="4" GraphColorRed="170" GraphColorGreen="255" GraphColorBlue="255" YMinSampled="-27" YMaxSampled="41" YAvgSampled="0.141347" Offset="4" ShowInGraph="0" ACCoupling="0" YOffset="0" IsAutoConfig="0" YResolution="50" MaxValue="-2147483648" File="..\task\gimbal_task.c" Scope="0" DrawStyle="0" />
+            </Symbol>
+            <Symbol>
+                <Options Name="testfdb" Address="0x200002CC" Type="float" TypeID="1" Size="4" GraphColorRed="255" GraphColorGreen="0" GraphColorBlue="0" YMinSampled="-11" YMaxSampled="14" YAvgSampled="0.0634082" Offset="8" ShowInGraph="0" ACCoupling="0" YOffset="0" IsAutoConfig="0" YResolution="50" MaxValue="-2147483648" File="..\task\gimbal_task.c" Scope="0" DrawStyle="0" />
+            </Symbol>
+            <Symbol>
+                <Options Name="see" Address="0x200000CC" Type="short" TypeID="11" Size="2" GraphColorRed="255" GraphColorGreen="255" GraphColorBlue="0" YMinSampled="-27" YMaxSampled="-13" YAvgSampled="-16.0476" Offset="12" ShowInGraph="1" ACCoupling="0" YOffset="0" IsAutoConfig="0" YResolution="5000" MaxValue="32767" File="..\components\algorithm\mydef.c" Scope="0" DrawStyle="0" />
+            </Symbol>
+            <Symbol>
+                <Options Name="out" Address="0x200000D6" Type="short" TypeID="11" Size="2" GraphColorRed="0" GraphColorGreen="255" GraphColorBlue="0" YMinSampled="-13230" YMaxSampled="11958" YAvgSampled="-1509.86" Offset="14" ShowInGraph="0" ACCoupling="0" YOffset="0" IsAutoConfig="0" YResolution="10000" MaxValue="32767" File="..\components\algorithm\mydef.c" Scope="0" DrawStyle="0" />
+            </Symbol>
+            <Symbol>
+                <Options Name="targetp" Address="0x200000CE" Type="short" TypeID="11" Size="2" GraphColorRed="0" GraphColorGreen="255" GraphColorBlue="255" YMinSampled="-27" YMaxSampled="-13" YAvgSampled="-16.0436" Offset="16" ShowInGraph="1" ACCoupling="0" YOffset="0" IsAutoConfig="0" YResolution="10000" MaxValue="32767" File="..\components\algorithm\mydef.c" Scope="0" DrawStyle="0" />
+            </Symbol>
+        </SelectedSymbols>
+    </Project>
+</JScopeProject>

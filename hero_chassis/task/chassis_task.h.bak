@@ -1,0 +1,76 @@
+#ifndef CHASSIStaskH
+#define CHASSIStaskH
+#include "main.h"
+
+typedef enum
+{
+    CHASSIS_FOLLOW_GIMBAL = 1,	//底盘跟随云盘行走
+    CHASSIS_GYROSCOPE     = 2,  //小陀螺模式
+    CHASSIS_NORMAL        = 3,  //底盘不跟随云台行走
+    CHASSIS_CORGI         = 4,  //扭屁股模式
+    CHASSIS_ROSHAN        = 5,  //打符模式
+    CHASSIS_SLOW          = 6,  //补弹低速模式
+    CHASSIS_SZUPUP        = 7,  //爬坡模式
+    CHASSIS_MISS          = 8,  //自动闪避模式
+    CHASSIS_PISA          = 9,  //45°模式
+} eChassisAction;
+extern eChassisAction actChassis;
+
+//底盘模式选择
+typedef enum
+{
+    CHASSIS_MECH_MODE = 0,//机械
+    CHASSIS_GYRO_MODE = 1,//陀螺仪
+} eChassisCtrlMode;
+extern eChassisCtrlMode  modeChassis;
+
+typedef struct
+{
+    float vx;
+    float vy;
+    float vw;
+} Chassis_Speed;
+
+typedef struct
+{
+    uint8_t W;
+    uint8_t S;
+    uint8_t A;
+    uint8_t D;
+    uint8_t JS;
+    float IP;
+} KEYflag;
+
+static void Chassis_InitArgument(void);
+static void SetChassisMotorMaxCurrent(const int16_t max1, const int16_t max2, const int16_t max3, const int16_t max4);
+static void RemoteControlChassis(void);
+static void KeyboardControlChassis(void);
+static void GetEnvironmentChassisMode(void);
+//static void LimitChassisMotorCurrent(void);
+static void mecanum_calc(Chassis_Speed *speed, int16_t *out_speed);
+static void Mecanum_Set_Motor_Speed(int16_t *out_speed, Motortype *Motor );
+static void Absolute_Cal(Chassis_Speed *absolute_speed, float angle )	;
+static float FindMinAnglePNY(void);
+//static float FindMinAngleFortyFive(void);
+static float Find_Y_AnglePNY(void);
+
+/*****************键盘模式*************************/
+static void CHASSIS_InitArgument(void);  //键盘底盘参数初始化//
+static void Chassis_Mode_Choose( void);   ////底盘键盘模式选择,按键响应//
+static void CHAS_Key_Ctrl( void);    ////键盘控制底盘移动/
+
+static void CHASSIS_SZUPUP_Mode_Ctrl(int16_t sMoveMax, int16_t sMoveRamp_inc, int16_t sMoveRamp_dec ); //手动爬坡函数
+static void CHASSIS_MISS_Mode_Ctrl(void);
+
+static void Chassis_Mouse_Move_Calculate( void);   /////鼠标控制底盘旋转,键盘QEC控制快速转圈//
+static void Chassis_Keyboard_Move_Calculate( int16_t sMoveMax, int16_t sMoveRamp_inc, int16_t sMoveRamp_dec );
+static float Chassis_Key_MoveRamp( uint8_t status, int16_t *time, int16_t inc, int16_t dec ); //键盘模式辅助函数
+static void Chassis_open_init(void);
+
+/*****************底盘功率*************************/
+static void Chassis_Power_Limit( void);
+static void CHASSIS_Single_Loop_Out( void); //底盘电机输出
+#endif
+
+
+

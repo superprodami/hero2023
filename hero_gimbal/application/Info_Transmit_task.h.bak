@@ -1,0 +1,23 @@
+
+#ifndef _INFO_TRANSMIT_TASK_H
+#define _INFO_TRANSMIT_TASK_H
+
+
+#include "struct_typedef.h"
+
+/**
+  * @brief          led rgb task
+  * @param[in]      pvParameters: NULL
+  * @retval         none
+  */
+/**
+  * @brief          led RGBÈÎÎñ
+  * @param[in]      pvParameters: NULL
+  * @retval         none
+  */
+extern void Info_Transmit_task(void const * argument);
+
+#endif
+
+
+

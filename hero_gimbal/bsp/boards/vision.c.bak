@@ -1,0 +1,136 @@
+#include "vision.h"
+#include "string.h"
+#include "mysystem.h"	
+VisionValueType VisionValue;
+uint8_t vision_buf[VISION_BUFLEN];
+uint8_t Vision_Send_Buff[1];
+
+void vision_callback_handler(uint8_t *buff)
+{
+	if(buff[0]=='s'&&buff[11]=='e')
+	{
+		memcpy(&(VisionValue.vision_yaw_value.buff[0]),&buff[1],4);
+		memcpy(&(VisionValue.vision_pitch_value.buff[0]),&buff[5],4);
+		VisionValue.shoot_target = buff[9];
+    VisionValue.identify_target = buff[10];
+    
+	}
+	else
+	{
+		memset(&VisionValue,0,sizeof(VisionValue));
+	}
+}
+const uint8_t LEFT2=1;
+const uint8_t LEFT1=2;
+const uint8_t RIGHT1=3;
+const uint8_t RIGHT2=4;
+void vision_buff_package(uint8_t mode,uint8_t level)
+{
+	uint16_t yawpre_data = rc.key.v;
+	static uint8_t yaw_offset = LEFT1;
+	static uint8_t yaw_offsetLast = LEFT1;
+	switch(yawpre_data)
+	{
+		case KEY_PRESSED_OFFSET_Z:
+			yaw_offset = LEFT2;
+			yaw_offsetLast = yaw_offset;
+			break;
+		case KEY_PRESSED_OFFSET_X:
+			yaw_offset = LEFT1;
+			yaw_offsetLast = yaw_offset;
+			break;
+		case KEY_PRESSED_OFFSET_C:
+			yaw_offset = RIGHT1;
+			yaw_offsetLast = yaw_offset;
+			break;
+		case KEY_PRESSED_OFFSET_V:
+			yaw_offset = RIGHT2;
+			yaw_offsetLast = yaw_offset;
+			break;
+		default:
+			yaw_offset = yaw_offsetLast;
+			break;
+	}
+  Vision_Send_Buff[0]=mode;
+}
+////	YawSpeed yawspeed;
+//	Vision_Send_Buff[0]='s';
+//	Vision_Send_Buff[1]=mode;
+//	Vision_Send_Buff[2]=level;  //等级信息
+//	Vision_Send_Buff[3]=0;
+//	Vision_Send_Buff[4]=0;
+//	Vision_Send_Buff[5]=yaw_offset;//0;
+//	Vision_Send_Buff[6]='e';
+//}
+
+///*-----------------------------------------------------------------*/
+//	#define	COMPENSATION_YAW	0
+//	#define	COMPENSATION_PITCH	0
+//	#define COMPENSATION_PITCH_DIST 0
+//	float SB_K_comps = 3.f;
+
+////角度初始化补偿
+//float Vision_Comps_Yaw   = COMPENSATION_YAW;
+//float Vision_Comps_Pitch = COMPENSATION_PITCH;//固定补偿，减小距离的影响
+//float Vision_Comps_Pitch_Dist = COMPENSATION_PITCH_DIST;//根据距离补偿
+
+///*******************************视觉误差获取*************************************/
+
+////视觉是否发了新数据,FALSE没有,TRUE发了新的
+//uint8_t Vision_Get_New_Data = FALSE;
+
+////打符是否换装甲了
+//uint8_t Vision_Armor = FALSE;
+
+///**
+//  * @brief  判断视觉数据更新了吗
+//  * @param  void
+//  * @retval TRUE更新了   FALSE没更新
+//  * @attention  为自瞄做准备,串口空闲中断每触发一次且通过校验,则Vision_Get_New_Data置TRUE
+//  */
+//bool Vision_If_Update(void)
+//{
+//	return Vision_Get_New_Data;
+//}
+
+///**
+//  * @brief  视觉数据更新标志位手动置0(false)
+//  * @param  void
+//  * @retval void
+//  * @attention  记得要清零,在哪清零自己选,调用这个函数就行
+//  */
+//void Vision_Clean_Update_Flag(void)
+//{
+//	Vision_Get_New_Data = FALSE;
+//}
+
+
+
+
+///**
+//  * @brief  判断换装甲板了吗
+//  * @param  void
+//  * @retval TRUE换了   FALSE没换
+//  * @attention  为自动打符做准备,串口空闲中断每触发一次且通过校验,则Vision_Armor置TRUE
+//  */
+//bool Vision_If_Armor(void)
+//{
+//	return Vision_Armor;
+//}
+
+///**
+//  * @brief  换装甲标志位手动置0(false)
+//  * @param  void
+//  * @retval void
+//  * @attention  记得要清零,在哪清零自己选,调用这个函数就行
+//  */
+//void Vision_Clean_Ammor_Flag(void)
+//{
+//	Vision_Armor = FALSE;
+//}
+
+////	Vision_Send_Buff[2]= yawspeed.uc[0];
+////	Vision_Send_Buff[3]=yawspeed.uc[1];
+////	Vision_Send_Buff[4]=yawspeed.uc[2];
+////	Vision_Send_Buff[5]=yawspeed.uc[3];
+////	yawspeed.f = yaw_speed_float;

@@ -1,0 +1,147 @@
+#include "protect_task.h"
+#include "iwdg.h"
+/**
+  * @brief  检测程序正常运行
+  * @param  void
+  * @retval void
+  * @attention
+  */
+  bool flag=1;
+void ShowRunningFun(void const *argument)
+{
+    portTickType currentTime;
+    for(;;)
+    {
+        currentTime = xTaskGetTickCount();//当前系统时间
+
+#if (SAFE_MODE==1)
+        if(currentTime > REMOTE_ulGetLostTime() || REMOTE_IfDataError() == true)	//遥控器失联时间过长,或者数据出错
+        {
+            if(flag)
+            {
+              soft_rest();
+              flag=0;
+            }
+            else
+            {
+              vTaskSuspend(GimbalTaskHandle);		//将任务挂起
+              vTaskSuspend(ChassisTaskHandle);
+              vTaskSuspend(ShootTaskHandle);
+              //vTaskSuspend(ImuTaskHandle);
+              vTaskResume(OutControlTaskHandle);//解挂失控保护控制任务
+
+              set_moto1234_current(&hcan1, 0, 0, 0, 0);
+              set_moto1234_current(&hcan2, 0, 0, 0, 0);	//加入CAN发送队列中
+              set_moto5678_current(&hcan1, 0, 0, 0, 0);
+              set_moto5678_current(&hcan2, 0, 0, 0, 0);
+              memset(&VisionValue, 0, sizeof(VisionValue));
+            }
+
+        }
+        else
+        {
+            flag=1;
+            //vTaskResume(ImuTaskHandle);//恢复任务
+            vTaskResume(GimbalTaskHandle);
+            vTaskResume(ChassisTaskHandle);
+            vTaskResume(ShootTaskHandle);
+            vTaskSuspend(OutControlTaskHandle);//挂起失控保护控制任务
+        }
+#endif
+        HAL_IWDG_Refresh(&hiwdg);//看门狗喂狗
+        vTaskDelayUntil(&currentTime, TIME_STAMP_20MS);//绝对延时
+    }
+}
+
+/**
+  * @brief  失控控制任务若解挂则每4ms执行一次，相对延迟
+  * @param  void
+  * @retval void
+  * @attention void
+  */
+void OutControl_Fun(void *pvParameters)
+{
+    for(;;)
+    {
+        vTaskDelay(TIME_STAMP_4MS);				//4ms
+
+        SystemValue = Starting; //系统恢复至重启状态
+        REMOTE_vResetData();//遥控数据恢复至默认状态
+
+        //关闭所有电机输出
+        set_moto1234_current(&hcan1, 0, 0, 0, 0);
+        set_moto1234_current(&hcan2, 0, 0, 0, 0);
+        set_moto5678_current(&hcan1, 0, 0, 0, 0);
+        set_moto5678_current(&hcan2, 0, 0, 0, 0);
+    }
+}
+
+/**
+  * @brief  系统软件复位，相当于按reset
+  * @param  void
+  * @retval void
+  * @attention void
+  */
+void soft_rest(void)
+{
+    __set_FAULTMASK(1); //关闭所有中断
+    NVIC_SystemReset(); //复位
+}
+
+/**
+  * @brief  在软件复位前，为了安全先停止所有电机
+  * @param  void
+  * @retval void
+  * @attention void
+  */
+void Stop_All(void)
+{
+    int i = 10;
+    while(i--)
+    {
+        /*************************云台******************************************/
+        Gimbal_MotorPitch.motor_value->target_speed_rpm = 0;
+        Gimbal_MotorYaw.motor_value->target_speed_rpm = 0;
+
+        Gimbal_MotorPitch.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Speed,
+                Gimbal_MotorPitch.motor_value->speed_rpm,
+                Gimbal_MotorPitch.motor_value->target_speed_rpm);
+        Gimbal_MotorYaw.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Speed,
+                Gimbal_MotorYaw.motor_value->speed_rpm,
+                Gimbal_MotorYaw.motor_value->target_speed_rpm);
+        /*************************关摩擦轮和拨弹盘******************************/
+        Ammunition_Motor.motor_value->target_speed_rpm = 0;
+        mocalun_l.motor_value->target_speed_rpm = 0;
+        mocalun_r.motor_value->target_speed_rpm = 0;
+
+        Ammunition_Motor.Motor_PID_Speed.f_cal_pid(&Ammunition_Motor.Motor_PID_Speed,
+                Ammunition_Motor.motor_value->speed_rpm,
+                Ammunition_Motor.motor_value->target_speed_rpm);
+        mocalun_l.Motor_PID_Speed.f_cal_pid(&mocalun_l.Motor_PID_Speed,
+                                            mocalun_l.motor_value->speed_rpm,
+                                            mocalun_l.motor_value->target_speed_rpm);
+        mocalun_r.Motor_PID_Speed.f_cal_pid(&mocalun_r.Motor_PID_Speed,
+                                            mocalun_r.motor_value->speed_rpm,
+                                            mocalun_r.motor_value->target_speed_rpm);
+        /*************************关底盘****************************************/
+        Chassis_Motor[0].motor_value->target_speed_rpm = 0;
+        Chassis_Motor[1].motor_value->target_speed_rpm = 0;
+        Chassis_Motor[2].motor_value->target_speed_rpm = 0;
+        Chassis_Motor[3].motor_value->target_speed_rpm = 0;
+
+        Chassis_Motor[0].Motor_PID_Speed.f_cal_pid(&Chassis_Motor[0].Motor_PID_Speed, Chassis_Motor[0].motor_value->speed_rpm,
+                -Chassis_Motor[0].motor_value->target_speed_rpm);
+        Chassis_Motor[1].Motor_PID_Speed.f_cal_pid(&Chassis_Motor[1].Motor_PID_Speed, Chassis_Motor[1].motor_value->speed_rpm,
+                +Chassis_Motor[1].motor_value->target_speed_rpm);
+        Chassis_Motor[2].Motor_PID_Speed.f_cal_pid(&Chassis_Motor[2].Motor_PID_Speed, Chassis_Motor[2].motor_value->speed_rpm,
+                -Chassis_Motor[2].motor_value->target_speed_rpm);
+        Chassis_Motor[3].Motor_PID_Speed.f_cal_pid(&Chassis_Motor[3].Motor_PID_Speed, Chassis_Motor[3].motor_value->speed_rpm,
+                +Chassis_Motor[3].motor_value->target_speed_rpm);
+
+        set_moto1234_current(&hcan2, 0, mocalun_l.Motor_PID_Speed.out, mocalun_r.Motor_PID_Speed.out, 0);
+        set_moto5678_current(&hcan1, Gimbal_MotorYaw.Motor_PID_Speed.out, Ammunition_Motor.Motor_PID_Speed.out, 0, 0);
+        set_moto5678_current(&hcan2, Gimbal_MotorPitch.Motor_PID_Speed.out, 0, 0, 0);
+        set_moto1234_current(&hcan1, Chassis_Motor[0].Motor_PID_Speed.out, Chassis_Motor[1].Motor_PID_Speed.out, Chassis_Motor[2].Motor_PID_Speed.out, Chassis_Motor[3].Motor_PID_Speed.out);
+        osDelay(1);
+    }
+}

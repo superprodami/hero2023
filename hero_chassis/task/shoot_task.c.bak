@@ -1,0 +1,590 @@
+/**
+  ******************************************************************************
+  * @file    shoot_task.c
+  * @brief   机器人的射击task，包括遥控器和键盘两种控制模式，以及热量限制、防卡弹等
+  *
+  ******************************************************************************
+  * @attention
+  *
+  * 2021.4 新写的防卡弹函数效果比较明显，不过个人认为仍然是权宜之计
+  * 上届留下来的热量限制函数也还可以用。具体限制方式为卡弹或即将超热量时进入relax模式，拨弹盘放松
+  * 同时跳过模式选择，防止放松被打断
+  *
+  *
+  ******************************************************************************
+  */
+#include "shoot_task.h"
+#include "param.h"
+#include "type.h"
+#include "mysystem.h"
+#include "judge.h"
+eShootAction actShoot = SHOOT_NORMAL;
+eShootAction actShoot_last = SHOOT_NORMAL;
+eShootState ShootState = UNSTART;
+
+fp32 Ammunition_Motor_Position_pid[3] = {6, 0, 10};
+fp32 Ammunition_Motor_Speed_pid_pos[3] = {20, 0.5, 0};
+fp32 Ammunition_Motor_Speed_pid[3] = {20, 1, 0};
+const static fp32 Mocalun_l_speed[3] = {8, 0.4, 0};
+const static fp32 Mocalun_r_speed[3] = {8, 0.4, 0};
+const static fp32 nothing[3] = {0, 0, 0};
+
+int32_t main_angle=0;
+void ShootFun(void const *argument)
+{
+    portTickType currentTime;
+
+    REVOLVER_InitArgument();
+  
+    while (1)
+    {
+        currentTime = xTaskGetTickCount(); //当前系统时间
+
+        Limit_something(); //热量控制 卡弹控制
+
+        switch(ControlMode)
+        {
+        case REMOTE:
+            RemoteShoot();
+            REVOLVER_Key_Ctrl();
+            break;
+        case KEYBOARD:
+            SHOOT_Mode_Choose();
+            REVOLVER_Key_Ctrl();
+            break;
+        }
+
+        vTaskDelayUntil(&currentTime, TIME_STAMP_2MS); //绝对延时
+    }
+}
+
+/**
+  * @brief  发射机构各参数初始化
+  * @param  void
+  * @retval void
+  * @attention void
+  */
+static void REVOLVER_InitArgument(void)
+{
+    Set_Bit(Flag_status.flag,1);
+    Set_Bit(Flag_status.flag,2);
+    Set_Bit(Flag_status.flag,3);
+    Set_Bit(Flag_status.flag,4);
+    Set_Bit(Flag_status.flag,5);
+    Set_Bit(Flag_status.flag,6);
+    Set_Bit(Flag_status.flag,7);
+    Flag_status.protect_flag_heat = false;
+    Flag_status.protect_flag_sutck = false;
+    Flag_status.shoot_cnt = 0;
+    Flag_status.shoot_left_time = 0;//计算左键连按时间,时间过长切换成连发
+
+    PID_clear(&Ammunition_Motor.Motor_PID_Speed);
+    PID_clear(&Ammunition_Motor.Motor_PID_Position);
+    //(Motortype*motor,int ID,float pid1[3], outmax1, imax1,       float pid2[3], outmax2, imax2
+    Motor_Init2(&mocalun_l, 1, nothing, PID_DELTA, 0, 0, 3e38, 0, 0, 8192, 0, Mocalun_l_speed, PID_DELTA, 30000, 4000, 3e38, 0, 0.1,  0, 0);
+    Motor_Init2(&mocalun_r, 2, nothing, PID_DELTA, 0, 0, 3e38, 0, 0, 8192, 0, Mocalun_r_speed, PID_DELTA, 30000, 4000, 3e38, 0, 0.1,  0, 0);
+    Motor_Init(&Ammunition_Motor, 6, Ammunition_Motor_Position_pid, PID_POSITION, 8000, 5000, 3000, 0, 0, 8192, 0,
+               Ammunition_Motor_Speed_pid, PID_DELTA, 8000, 5000, 3e38, 0, 0.1, 0, 0);
+}
+
+/**
+  * @brief  键盘模式下发弹模式选择
+  * @param  void
+  * @retval void
+  * @attention  普通模式清零计算,且不发弹
+  */
+bool single_shoot_flag = 1;
+static void SHOOT_Mode_Choose(void)
+{
+    main_angle = Ammunition_Motor.motor_value->total_angle / 19;
+    if(ShootState == UNSTART)
+    {
+        mocalun_l.motor_value->target_speed_rpm = 0;
+        mocalun_r.motor_value->target_speed_rpm = 0;
+        Ammunition_Motor.motor_value->target_speed_rpm = 0;
+        Ammunition_Motor.motor_value->total_angle = 0;
+        Ammunition_Motor.motor_value->target_angle = Ammunition_Motor.motor_value->total_angle/19;
+        actShoot = SHOOT_NORMAL;
+        ShootState = START;
+    }
+    else if(ShootState != UNSTART && !(Flag_status.protect_flag_sutck || Flag_status.protect_flag_heat))
+    {
+        if((IF_MOUSE_PRESSED_LEFT && Flag_status.shoot_left_time <= TIME_STAMP_200MS && actGimbal != GIMBAL_AUTO) || (actGimbal == GIMBAL_AUTO && IF_MOUSE_PRESSED_LEFT && VisionValue.shoot_target == '1'))//左键发弹
+        {
+            Flag_status.shoot_left_time++;//判断长按,切换
+//            if(Flag_status.flag & (1 << 1))
+//            {
+              actShoot_last = actShoot;
+//              Clear_Bit(Flag_status.flag,1);
+//            }
+            if(!(Flag_status.flag & (1 << 2))) Set_Bit(Flag_status.flag,2);
+            if(!(Flag_status.flag & (1 << 3))) Set_Bit(Flag_status.flag,3);
+            if(!(Flag_status.flag & (1 << 4))) Set_Bit(Flag_status.flag,4);
+            if(!(Flag_status.flag & (1 << 5))) Set_Bit(Flag_status.flag,5);
+
+            actShoot = SHOOT_SINGLE;
+
+            mocalun_l.motor_value->target_speed_rpm = -(int16_t)Judge_Speed();
+            mocalun_r.motor_value->target_speed_rpm = (int16_t)Judge_Speed();
+        }
+        else if(IF_MOUSE_PRESSED_LEFT && Flag_status.shoot_left_time > TIME_STAMP_200MS && actGimbal != GIMBAL_AUTO)	//连按大于200ms
+        {
+            Flag_status.shoot_left_time++;
+            Flag_status.shoot_cnt++;
+            Flag_status.shoot_cnt = Flag_status.shoot_cnt > 65530? 10 : Flag_status.shoot_cnt;
+            if(Flag_status.flag & (1 << 2))
+            {
+              actShoot_last = actShoot;
+              Clear_Bit(Flag_status.flag,2);
+            }
+            if(!(Flag_status.flag & (1 << 1))) Set_Bit(Flag_status.flag,1);
+            if(!(Flag_status.flag & (1 << 3))) Set_Bit(Flag_status.flag,3);
+            if(!(Flag_status.flag & (1 << 4))) Set_Bit(Flag_status.flag,4);
+            if(!(Flag_status.flag & (1 << 5))) Set_Bit(Flag_status.flag,5);
+
+            actShoot = SHOOT_TRIPLE;//连发模式
+
+            mocalun_l.motor_value->target_speed_rpm = -(int16_t)Judge_Speed();
+            mocalun_r.motor_value->target_speed_rpm = (int16_t)Judge_Speed();
+        }
+        else if(IF_KEY_PRESSED_C)
+        {
+            if(Flag_status.flag & (1 << 3))
+            {
+              actShoot_last = actShoot;
+              Clear_Bit(Flag_status.flag,3);
+            }
+            if(!(Flag_status.flag & (1 << 1))) Set_Bit(Flag_status.flag,1);
+            if(!(Flag_status.flag & (1 << 2))) Set_Bit(Flag_status.flag,2);
+            if(!(Flag_status.flag & (1 << 4))) Set_Bit(Flag_status.flag,4);
+            if(!(Flag_status.flag & (1 << 5))) Set_Bit(Flag_status.flag,5);
+
+            actShoot = SHOOT_NORMAL;//普通模式
+
+            Flag_status.shoot_cnt = 0;
+            if(actGimbal != GIMBAL_AUTO)
+            {
+              mocalun_l.motor_value->target_speed_rpm = 0;
+              mocalun_r.motor_value->target_speed_rpm = 0;
+            }
+        }
+        else if(IF_KEY_PRESSED_X) //需要按住才有用
+        {
+            if(Flag_status.flag & (1 << 5))
+            {
+              actShoot_last = actShoot;
+              Clear_Bit(Flag_status.flag,5);
+            }
+            if(!(Flag_status.flag & (1 << 1))) Set_Bit(Flag_status.flag,1);
+            if(!(Flag_status.flag & (1 << 2))) Set_Bit(Flag_status.flag,2);
+            if(!(Flag_status.flag & (1 << 3))) Set_Bit(Flag_status.flag,3);
+            if(!(Flag_status.flag & (1 << 4))) Set_Bit(Flag_status.flag,4);
+
+            actShoot = STOP;
+
+            Flag_status.shoot_cnt = 0;
+        }
+        else if(((!IF_MOUSE_PRESSED_LEFT && actGimbal != GIMBAL_AUTO) || (actGimbal == GIMBAL_AUTO && VisionValue.shoot_target == '0')) && single_shoot_flag == 0)
+        {
+            if(actShoot == SHOOT_SINGLE && fabs(main_angle - Ammunition_Motor.motor_value->target_angle) > 200 && actGimbal == GIMBAL_AUTO)
+              actShoot = SHOOT_SINGLE;
+            else
+            {
+              if(Flag_status.flag & (1 << 4))
+              {
+                actShoot_last = actShoot;
+                Clear_Bit(Flag_status.flag,4);
+              }
+              if(!(Flag_status.flag & (1 << 1))) Set_Bit(Flag_status.flag,1);
+              if(!(Flag_status.flag & (1 << 2))) Set_Bit(Flag_status.flag,2);
+              if(!(Flag_status.flag & (1 << 3))) Set_Bit(Flag_status.flag,3);
+              if(!(Flag_status.flag & (1 << 5))) Set_Bit(Flag_status.flag,5);
+
+              actShoot = SHOOT_NORMAL;
+
+              single_shoot_flag=1;
+              Flag_status.shoot_left_time = 0;
+            }
+        }
+    }
+}
+
+/**
+  * @brief  拨盘重启
+  * @param  void
+  * @retval void
+  * @attention 枪口超热量重置 现在用relax模式替代
+  */
+//static void REVOLVER_Rest(void)
+//{
+//    //PID积分清零
+//    Ammunition_Motor.Motor_PID_Speed.out = 0;
+//    Ammunition_Motor.Motor_PID_Speed.Pout = 0;
+//    Ammunition_Motor.Motor_PID_Speed.Iout = 0;
+//}
+
+/************************底盘键盘模式各类模式小函数****************************/
+
+/*******键盘模式************/
+/**
+  * @brief  单发控制
+  * @param  void
+  * @retval void
+  * @attention
+  */
+static void SHOOT_SINGLE_Ctrl(void)
+{
+    if(single_shoot_flag)  //保证鼠标按下瞬间这段代码只执行一次
+    {
+        Ammunition_Motor.motor_value->target_angle = main_angle;
+        Ammunition_Motor.motor_value->target_angle += 2048;
+        //保证鼠标每按下一次产生的pid差值均为2048
+        single_shoot_flag = 0;
+    }
+    pid_reset(&(Ammunition_Motor.Motor_PID_Speed), Ammunition_Motor_Speed_pid_pos);
+
+    Ammunition_Motor.Motor_PID_Position.f_cal_pid(&Ammunition_Motor.Motor_PID_Position,
+            main_angle,
+            Ammunition_Motor.motor_value->target_angle);
+    
+
+    Ammunition_Motor.motor_value->target_speed_rpm = Ammunition_Motor.Motor_PID_Position.out;
+}
+
+/**
+  * @brief  拨盘的键盘模式
+  * @param  void
+  * @retval void
+  * @attention 键盘用位置环控制
+  */
+static void REVOLVER_Key_Ctrl(void)
+{
+    /*------ 左键抬起后才能打下一颗 -------*/
+    switch(actShoot)
+    {
+      case SHOOT_NORMAL:
+      {
+          pid_reset(&(Ammunition_Motor.Motor_PID_Speed), Ammunition_Motor_Speed_pid);
+          Ammunition_Motor.motor_value->target_speed_rpm = 0;
+          if(Gimbal_MotorPitch.motor_value->speed_rpm > 3)  //拉鼠标且鼠标左键没有按下 抬头 拨弹盘倒转
+          {
+            Ammunition_Motor.motor_value->target_speed_rpm = -Gimbal_MotorPitch.motor_value->speed_rpm * 25;
+          }
+          else if(MOUSE_Y_MOVE_SPEED < -2)//考虑Pitch轴充满弹卡住无法抬起的情况
+          {
+            Ammunition_Motor.motor_value->target_speed_rpm = MOUSE_Y_MOVE_SPEED * 30;
+          }
+          break;
+      }
+      case SHOOT_SINGLE:
+      {
+          SHOOT_SINGLE_Ctrl();
+          break;
+      }
+      case SHOOT_TRIPLE:
+      {
+          pid_reset(&(Ammunition_Motor.Motor_PID_Speed), Ammunition_Motor_Speed_pid);
+          Ammunition_Motor.motor_value->target_angle = Ammunition_Motor.motor_value->angle;
+        
+          if((Flag_status.shoot_cnt > 1) && IF_KEY_PRESSED_CTRL)//无视热量 一键超频
+              Ammunition_Motor.motor_value->target_speed_rpm = 550;
+          else if(Flag_status.shoot_cnt > 1)
+              Ammunition_Motor.motor_value->target_speed_rpm = 450;
+          else
+              Ammunition_Motor.motor_value->target_speed_rpm = 0;
+
+          if(Gimbal_MotorPitch.motor_value->speed_rpm > 3)//抬头 拨弹盘倒转
+          {
+            Ammunition_Motor.motor_value->target_speed_rpm = -Gimbal_MotorPitch.motor_value->speed_rpm * 25 + 200;
+          }
+          else if(MOUSE_Y_MOVE_SPEED < -2)//考虑Pitch轴充满弹卡住无法抬起的情况
+          {
+            Ammunition_Motor.motor_value->target_speed_rpm = MOUSE_Y_MOVE_SPEED * 30 + 200;
+          }
+          break;
+      }
+      case RELAX:
+      {
+          if(Gimbal_MotorPitch.motor_value->speed_rpm > 3)  //抬头 拨弹盘倒转
+          {
+            Ammunition_Motor.motor_value->target_speed_rpm = -Gimbal_MotorPitch.motor_value->speed_rpm * 25 - 80;
+          }
+          else if(MOUSE_Y_MOVE_SPEED < -3)//考虑Pitch轴充满弹卡住无法抬起的情况
+          {
+            Ammunition_Motor.motor_value->target_speed_rpm = MOUSE_Y_MOVE_SPEED * 30 - 80;
+          }
+          else
+          {
+            PID_clear(&Ammunition_Motor.Motor_PID_Speed);
+            PID_clear(&Ammunition_Motor.Motor_PID_Position);
+          }
+          break;
+      }
+      case STOP:
+      {
+        Ammunition_Motor.motor_value->target_speed_rpm = 0;
+        if(Gimbal_MotorPitch.motor_value->speed_rpm > 3)  //抬头 拨弹盘倒转
+          {
+            Ammunition_Motor.motor_value->target_speed_rpm = -Gimbal_MotorPitch.motor_value->speed_rpm * 25;
+          }
+          else if(MOUSE_Y_MOVE_SPEED < -3)//考虑Pitch轴充满弹卡住无法抬起的情况
+          {
+            Ammunition_Motor.motor_value->target_speed_rpm = MOUSE_Y_MOVE_SPEED * 30;
+          }
+        break;
+      }
+      default:
+          break;
+    }
+    Ammunition_Motor.Motor_PID_Speed.f_cal_pid(&Ammunition_Motor.Motor_PID_Speed,
+            Ammunition_Motor.motor_value->speed_rpm,
+            Ammunition_Motor.motor_value->target_speed_rpm);
+
+    mocalun_l.Motor_PID_Speed.f_cal_pid(&mocalun_l.Motor_PID_Speed, mocalun_l.motor_value->speed_rpm, mocalun_l.motor_value->target_speed_rpm);
+    mocalun_r.Motor_PID_Speed.f_cal_pid(&mocalun_r.Motor_PID_Speed, mocalun_r.motor_value->speed_rpm, mocalun_r.motor_value->target_speed_rpm);
+    set_moto1234_current(&hcan2, mocalun_l.Motor_PID_Speed.out, mocalun_r.Motor_PID_Speed.out, 0, 0);
+    /*can1底盘轮子1234 5YAW 6拨弹盘 78空
+    can2 1摩擦轮l 2摩擦轮r 3空 4空 5PITCH 678空*/
+}
+
+/*********************射频热量限制****************************/
+
+/**
+  * @brief  枪管热量限制
+  * @param  void
+  * @retval 热量是否超限
+  * @attention  超限要重置一下拨盘,根据剩余可发弹量来做闭环
+  *             如果做双枪管则此函数不适用
+  */
+static bool Revolver_Heat_Limit(void)
+{
+    //static uint16_t  usShootNumAllow  = 0;
+    static uint16_t  usHeatBuffer = 0;
+    static bool  IfShootAllow  =  TRUE;
+
+    static  uint16_t  usShootNumBuffer = 0;
+    static  portTickType  ulShootTimeRecordReal = 0;
+    static  portTickType  msShootTimeRecord = 0;
+    //static  uint16_t  usShootHeatRecord = 0;
+    static  uint16_t  usShootNumPrev = 0;
+    //static  uint16_t  usHeatPrev        = 0;
+
+    //static  uint32_t  ulOfflineCnt      = 0;
+    uint16_t  usHeatReal = 0;
+    uint16_t  usShootNumReal = 0;
+    uint16_t  usHeatOneShoot = 100;  //裁判系统检测到打一颗，枪口热量加80，与其初速度无关 规则是一发100 不过考虑到送弹延迟可以适当些小一点
+    uint16_t  usHeatLimit;
+    //static  uint32_t  ShootNumBuffer_Error = 0;//计数长时间过大，认为出错，清零
+
+    /* 读取热量 */
+    usHeatReal = JUDGE_usGetRemoteHeat42();
+    /* 读取热量上限*/
+    usHeatLimit = JUDGE_usGetHeatLimit();
+
+    /* 读取射击次数 */
+    usShootNumReal = JUDGE_usGetShootNum();
+
+    /* 记录当前时间 */
+    ulShootTimeRecordReal = xTaskGetTickCount();
+
+    /* 只要过100MS枪口冷却值减 */
+    if(ulShootTimeRecordReal > msShootTimeRecord)
+    {
+        msShootTimeRecord = ulShootTimeRecordReal + 100;
+        usShootNumBuffer -= JUDGE_usGetShootCold() / 10;
+    }
+
+    /* 只要打了弹就增加 */
+    if (usShootNumReal > usShootNumPrev)
+    {
+        usShootNumBuffer += 10;
+    }
+
+    /* 剩余热量 */
+    if (usHeatReal <= usHeatLimit)
+    {
+        usHeatBuffer = usHeatLimit - usHeatReal;
+    }
+    else
+    {
+        usHeatBuffer = 0;
+    }
+
+    if (usHeatBuffer > usHeatOneShoot)//剩余热量大于打一发所需热量
+    {
+        /* 还能打出的子弹数目 */
+        IfShootAllow = TRUE;
+    }
+    else
+    {
+        IfShootAllow = FALSE;
+    }
+
+    usShootNumPrev = usShootNumReal;
+    if(IF_KEY_PRESSED_CTRL)//无视热量 一键超频
+      return true;
+    else
+      return IfShootAllow;
+}
+
+/*****************************卡弹处理**************************************/
+/************卡弹************/
+#define Stuck_Revol_PIDTerm   7000      //PID输出大于这个数则认为有可能卡弹
+#define Stuck_Speed_Low       70         //测量速度低于这个数,则认为有可能卡弹
+
+#define Stuck_SpeedPID_Time   60        //速度连续 ms过小,PID连续  ms过大
+#define Stuck_Relax_Time   TIME_STAMP_100MS       //放松时间,时间越长倒得越多
+/**
+  * @brief  速度环式卡弹处理
+  * @param  void
+  * @retval void
+  * @attention  卡住就松力，过一会再重新上力
+  */
+static void REVOL_SpeedStuck(void)
+{
+    static uint16_t  stuck_time    = 0;//卡弹计时
+    static uint16_t  relax_time = 0;//放松计时
+    static bool Revol_Speed_ifStuck = FALSE;//卡弹判断
+
+    if (Revol_Speed_ifStuck == TRUE)//已确认卡弹,开始放松计时
+    {
+        if(Flag_status.flag & (1 << 7))
+        {
+          actShoot_last = actShoot;
+          Clear_Bit(Flag_status.flag,7);
+        }
+        actShoot = RELAX;
+        Flag_status.protect_flag_sutck = 1;
+        relax_time++;//放松一定时间
+
+        if (relax_time > Stuck_Relax_Time)//放松完成
+        {
+            relax_time = 0;
+            Flag_status.protect_flag_sutck = 0;
+            Revol_Speed_ifStuck = FALSE;//可以正转
+            Ammunition_Motor.motor_value->target_angle = main_angle;
+        }
+    }
+    else
+    {
+        if ( fabs(Ammunition_Motor.Motor_PID_Speed.out) >= Stuck_Revol_PIDTerm //PID输出过大
+                && abs(Ammunition_Motor.motor_value->speed_rpm) <= Stuck_Speed_Low)//速度过低
+        {
+            stuck_time++;//卡弹计时
+        }
+        else
+        {
+            stuck_time = 0;//没有长时间卡弹,及时清零
+        }
+
+        if (stuck_time > Stuck_SpeedPID_Time)//卡了超过60ms
+        {
+            stuck_time = 0;
+            Revol_Speed_ifStuck = TRUE;//标记可以进入放松计时
+        }
+        Set_Bit(Flag_status.flag,7);
+        Flag_status.protect_flag_sutck = 0;
+    }
+}
+/**
+  * @brief  防卡弹，防超热量，各种防
+  * @param  void
+  * @retval void
+  * @attention  void
+  */
+static void Limit_something(void)
+{
+    if(Revolver_Heat_Limit() == FALSE)
+    {
+        if(Flag_status.flag & (1 << 6))
+        {
+          actShoot_last = actShoot;
+          Clear_Bit(Flag_status.flag,6);
+        }
+        actShoot = STOP;
+        Flag_status.protect_flag_heat = 1;
+    }
+    else
+    {
+        Flag_status.protect_flag_heat = 0;
+        Set_Bit(Flag_status.flag,6);
+    }
+    REVOL_SpeedStuck();
+}
+
+/**
+  * @brief  根据裁判系统返回值确定当前射速
+  * @param  void
+  * @retval void
+  * @attention  void
+  */
+static uint16_t Judge_Speed(void)
+{
+    uint8_t Speed_limit=0;
+    uint16_t rate=0;
+    Speed_limit = JUDGE_usGetSpeedLimit();
+    switch(Speed_limit)
+    {
+      case 10:
+          rate = 3900;
+        break;
+      case 16:
+          rate = 5700;
+        break;
+      default:
+        rate = 4000;
+        break;
+    }
+    return rate;
+}
+
+/**
+  * @brief  遥控器控制射弹
+  * @param  void
+  * @retval void
+  * @attention void
+  */
+static void RemoteShoot(void)
+{
+    if(!(Flag_status.protect_flag_sutck || Flag_status.protect_flag_heat))
+    {
+        if((rc.sw1 == 3 && rc.sw2 == 2) || Flag_status.moca_flag == 1 || (Flag_status.moca_flag == 0 && Flag_status.Ammunition_flag == 0))
+        {
+            Flag_status.moca_flag = 1;
+            Ammunition_Motor.motor_value->target_speed_rpm = 0;
+            mocalun_l.motor_value->target_speed_rpm = 0;
+            mocalun_r.motor_value->target_speed_rpm = 0;
+        }
+        if((rc.sw1 == 3 && rc.sw2 == 3) || Flag_status.moca_flag == 2)
+        {
+            Flag_status.moca_flag = 2;
+            mocalun_l.motor_value->target_speed_rpm = -4000;  //3200/5.9 4000/9.5 4800/12.6 5120 12.2 6400/15.0   转速/射速
+            mocalun_r.motor_value->target_speed_rpm = 4000;
+        }
+        if((rc.sw1 == 3 && rc.sw2 == 1) || Flag_status.moca_flag == 3)
+        {
+            Flag_status.moca_flag = 3;
+            mocalun_l.motor_value->target_speed_rpm = -5760;
+            mocalun_r.motor_value->target_speed_rpm = 5760;
+        }
+        if((rc.sw1 == 2 && rc.sw2 == 2) || Flag_status.Ammunition_flag == 4)
+        {
+            Flag_status.Ammunition_flag = 4;
+            actShoot_last = actShoot;
+            actShoot = SHOOT_NORMAL;//普通模式
+        }
+        if((rc.sw1 == 2 && rc.sw2 == 3) || Flag_status.Ammunition_flag == 5)
+        {
+            Flag_status.Ammunition_flag = 5;
+            actShoot_last = actShoot;
+            actShoot = SHOOT_TRIPLE;//连发模式
+            Flag_status.shoot_cnt = 10;
+        }
+        if((rc.sw1 == 2 && rc.sw2 == 1) || Flag_status.Ammunition_flag == 6)
+        {
+            Flag_status.Ammunition_flag = 6;
+            ControlMode = KEYBOARD;
+        }
+    }
+
+}

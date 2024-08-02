@@ -1,0 +1,882 @@
+#include "gimbal_task.h"
+#include "kalman_filter.h"
+#include "param.h"
+#include "type.h"
+#include "mysystem.h"
+GimbalModeType YawGimbalMode   = USEIMU;
+GimbalModeType PitchGimbalMode = USEIMU;
+eGimbalAction  actGimbal       = GIMBAL_NORMAL;       ////云台操作模式///
+/*************卡尔曼滤波**************/
+/*二阶卡尔曼*/  //自瞄
+//云台角度误差卡尔曼
+kalman_filter_init_t yaw_kalman_filter_para =
+{
+    .xhat_data = {0, 0},                                  //状态矩阵 位置（角度）、速度 (会被快速迭代，不是很重要)
+    .P_data = {2, 0, 0, 2},                               //预测状态协方差矩阵(会被快速迭代，不是很重要)
+    .A_data = {1, 0.002, 0, 1},//采样时间间隔             //状态转移矩阵
+    .B_data = {0.002 * 0.002 * 0.5, 0.002},               //控制矩阵
+    .Q_data = {1, 0, 0, 1},                               //状态转移矩阵的协方差矩阵 “预测模型”本身的噪声
+    .H_data = {1, 0, 0, 1},                               //观测矩阵
+    .R_data = {200, 0, 0, 400}//500 1000                  //观测矩阵的协方差(噪声方差)
+};//初始化yaw的部分kalman参数
+
+kalman_filter_init_t pitch_kalman_filter_para =
+{
+    .xhat_data = {0, 0},
+    .P_data = {2, 0, 0, 2},
+    .A_data = {1, 0.002, 0, 1},//采样时间间隔
+    .B_data = {0.002 * 0.002 * 0.5, 0.002},
+    .Q_data = {1, 0, 0, 1},
+    .H_data = {1, 0, 0, 1},
+    .R_data = {200, 0, 0, 400}
+};//初始化pitch的部分kalman参数
+
+kalman_filter_t yaw_kalman_filter;
+kalman_filter_t pitch_kalman_filter;
+extKalman_t follow_kalman_yaw;
+extKalman_t follow_kalman_pitch;
+//extKalman_t Gimbal_Kalman_Yaw;
+//extKalman_t Gimbal_Kalman_Pitch;
+float *yaw_kf_result, *pitch_kf_result;//二阶卡尔曼滤波结果,0角度 1速度
+
+static void gimbal_PID_clear(PidTypeDef *gimbal_pid_clear)
+{
+    if (gimbal_pid_clear == NULL)
+    {
+        return;
+    }
+    gimbal_pid_clear->error[0] = gimbal_pid_clear->error[1] = gimbal_pid_clear->error[2] = 0.0f;
+    gimbal_pid_clear->Dbuf[0] = gimbal_pid_clear->Dbuf[1] = gimbal_pid_clear->Dbuf[2] = 0.0f;
+    gimbal_pid_clear->out = gimbal_pid_clear->Pout = gimbal_pid_clear->Iout = gimbal_pid_clear->Dout = 0.0f;
+}
+
+void GimbalFun(void const *argument)
+{
+    portTickType currentTime;
+
+    GIMBAL_InitArgument();
+    while(1)
+    {
+        currentTime = xTaskGetTickCount();//当前系统时间
+        if(imu_init_finish_flag)
+        {
+            //          if(rc.sw1 == 2 && rc.sw2 == 1)
+            //            GIMBAL_State_Change(USEENCODER);
+            //          else if(rc.sw1 == 2 && rc.sw2 == 2)
+            //            GIMBAL_State_Change(USEIMU);
+            //          if(rc.sw1 == 2 && rc.sw2 == 2)
+            //            actGimbal = GIMBAL_NORMAL;
+            //          else if(rc.sw1 == 2 && rc.sw2 == 1)
+            //            actGimbal = GIMBAL_AUTO;
+
+            switch(ControlMode)
+            {
+            case KEYBOARD:
+            {
+                if(SystemValue == Starting)
+                {
+                    GimbalOpenInit();           //刚开启，将云台缓慢的移动到正向
+                    //SystemValue = Running;      //系统初始化结束
+                }
+                else
+                {
+                    //GIMBAL_State_Change_key();
+                    GIMBAL_Mode_Choose();
+                    GIMBAL_Key_Ctrl();
+                    GIMBAL_Double_Loop_Out();
+                }
+                break;
+            }
+            case REMOTE:
+            {
+                if(SystemValue == Starting)
+                {
+                    //GimbalOpenInit();           //刚开启，将云台缓慢的移动到正向
+                    SystemValue = Running;      //系统初始化结束
+                }
+                GIMBAL_Key_Ctrl();
+                RemoteControlGimbal();
+                break;
+            }
+            default:
+                break;
+            }
+        }
+        vTaskDelayUntil(&currentTime, TIME_STAMP_2MS);
+    }
+}
+
+
+/**
+  * @brief  云台参数初始化
+  * @param  void
+  * @retval void
+  * @attention 没有加I会有误差,只在系统启动时调用一次
+  **/
+followStruct followData = {0};
+
+float Cloud_Angle_Target[2][2];//  pitch/yaw    mech/gyro
+
+const static fp32 Gimbal_Yaw_speed_pid[3]            = {18,  0.5, 0};   //200 1.6  //100 0.8 0
+const static fp32 Gimbal_Yaw_imu_pid[3]              = {300, 2, 100};  //IMU位置环pid //30 0.05 60  //30 0.2 0
+//const static fp32 Gimbal_Yaw_Encoder_Position_pid[3] = {10, 0, 0};    //encoder位置环pidW
+
+const static fp32 Gimbal_Pitch_Speed_pid[3]            = {120, 10, 0};   //20 0 0
+const static fp32 Gimbal_Pitch_imu_pid[3]              = {100, 1, 600};   //IMU位置环pid  30 0.02 150
+//const static fp32 Gimbal_Pitch_Encoder_Position_pid[3] = {10, 0, 0};     //encoder位置环pid
+fp32 gimbalnothing[3]                     = {0, 0, 0};
+
+static void GIMBAL_InitArgument(void)
+{
+    PID_clear(&Gimbal_MotorYaw.Motor_PID_Position);
+    PID_clear(&Gimbal_MotorPitch.Motor_PID_Position);
+    PID_clear(&Gimbal_MotorPitch.Motor_PID_Speed);
+    PID_clear(&Gimbal_MotorYaw.Motor_PID_Speed);
+
+    //Yaw Pitch陀螺仪
+    //    pid_init(&Gimbal_Yawimu_PID);
+    //    pid_init(&Gimbal_Pitchimu_PID);                                                    //max_out   max_iout   I_Separation   Dead_Zone  gama    angle_max     angle_min
+    //    Gimbal_Yawimu_PID.f_param_init(&Gimbal_Yawimu_PID, PID_DELTA, Gimbal_Yaw_imu_pid,       3000,     10,       25,            0,         0,      360,           0);
+    //    Gimbal_Pitchimu_PID.f_param_init(&Gimbal_Pitchimu_PID, PID_DELTA, Gimbal_Pitch_imu_pid, 100,      10,       5,             0,         0,      360,           0);
+
+    //Motortype*motor            ID
+    Motor_Init(&Gimbal_MotorYaw, 5,
+               //   float pid1[3],                outmax1 imax1 I_Separation Dead_Zone  gama angle_max angle_min
+               Gimbal_Yaw_imu_pid, PID_DELTA,     5000,   500,   45,          0,         0,   360,      0,
+               //   float pid2[3],                outmax2 imax2 I_Separation Dead_Zone  gama angle_max angle_min
+               Gimbal_Yaw_speed_pid, PID_DELTA,    5000,   500,   3e38,        0,         0.1, 0,        0);
+    Motor_Init2(&Gimbal_MotorPitch, 5,
+                //   float pid1[3],                  outmax1 imax1 I_Separation Dead_Zone  gama angle_max angle_min
+                Gimbal_Pitch_imu_pid, PID_POSITION,   10000,  500,  25,           0,        0,   360,      0,
+                //   float pid2[3],                  outmax2 imax2 I_Separation Dead_Zone  gama angle_max angle_min
+                Gimbal_Pitch_Speed_pid, PID_POSITION, 23000,  400,  3e38,        0,        0.1, 0,        0);
+    //    KalmanCreate(&Gimbal_Kalman_Yaw, 1, 1);
+    //    KalmanCreate(&Gimbal_Kalman_Pitch, 1, 1);
+
+    //二阶自瞄滤波
+    kalman_filter_init(&yaw_kalman_filter, &yaw_kalman_filter_para);
+    kalman_filter_init(&pitch_kalman_filter, &pitch_kalman_filter_para);
+
+    //一阶自瞄滤波
+    KalmanCreate(&follow_kalman_yaw,   1, 100);
+    KalmanCreate(&follow_kalman_pitch, 1, 100);
+}
+
+/**
+  * @brief  遥控器控制方式
+  * @param  void
+  * @retval void
+  * @attention
+  */
+static void RemoteControlGimbal(void)
+{
+    static uint32_t time;
+    static uint32_t lasttime;
+    static bool FLAG_Remote = 1;
+    static bool follow_flag_remote = 1;
+
+    if(rc.ch1 != 0)
+        FLAG_Remote = 1;
+    else                                            //如果静止
+    {
+        if(FLAG_Remote)                                     //如果是第一次
+        {
+            lasttime = xTaskGetTickCount();              //更新时间
+            time = xTaskGetTickCount();
+            FLAG_Remote = 0;
+        }
+        else
+        {
+            time = xTaskGetTickCount();
+        }
+    }
+
+    if(YawGimbalMode == USEENCODER) //纯编码器调YAW轴
+    {
+        Gimbal_MotorYaw.motor_value->target_angle -= (float)rc.ch1 / SENSITIVITY_REMOTE_GIMBAL_YAW; //目标编码器角度
+        AngleLoop_f(&(Gimbal_MotorYaw.motor_value->target_angle), 8192);
+
+        Gimbal_MotorYaw.Motor_PID_Position.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Position,
+                Gimbal_MotorYaw.motor_value->main_angle,
+                Gimbal_MotorYaw.motor_value->target_angle);
+
+        Gimbal_MotorYaw.motor_value->target_speed_rpm =  Gimbal_MotorYaw.Motor_PID_Position.out; //位置环
+
+        Gimbal_MotorYaw.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Speed,
+                Gimbal_MotorYaw.motor_value->speed_rpm, //速度环
+                Gimbal_MotorYaw.motor_value->target_speed_rpm);
+    }
+    else if(YawGimbalMode == USEIMU) //IMU调YAW轴
+    {
+        //目标值累加
+        if(actGimbal == GIMBAL_NORMAL)
+            Cloud_Angle_Target[YAW][GYRO] -= (float)rc.ch1 / 1000;    //目标陀螺仪角度
+
+        //板载陀螺仪YAW轴位置环+电机速度环
+        AngleLoop_f(&Cloud_Angle_Target[YAW][GYRO], 360);
+
+        Gimbal_MotorYaw.Motor_PID_Position.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Position, IMU_angle[0], Cloud_Angle_Target[YAW][GYRO]);
+
+        Gimbal_MotorYaw.motor_value->target_speed_rpm = Gimbal_MotorYaw.Motor_PID_Position.out;
+
+        //零漂状态机 消除因陀螺仪漂移而导致的云台漂移
+        if((VisionValue.identify_target == '0' || actGimbal == GIMBAL_NORMAL) && rc.ch1 == 0 && actChassis != CHASSIS_GYROSCOPE) //如果不在自瞄模式
+        {
+            if(actChassis == CHASSIS_FOLLOW_GIMBAL)//单独处理跟随云台的情况
+            {
+                if(follow_flag_remote)
+                {
+                    //更新lasttime
+                    lasttime = xTaskGetTickCount();
+                    follow_flag_remote = 0;
+                }
+            }
+            else
+                follow_flag_remote = 1;
+
+            if((time - lasttime) > 3000) //摇杆回中超过3秒 认为应当停止抖动
+            {
+                Gimbal_MotorYaw.motor_value->target_speed_rpm = 0;
+                gimbal_PID_clear(&Gimbal_MotorYaw.Motor_PID_Position);
+            }
+        }
+
+        if(actChassis == CHASSIS_GYROSCOPE) follow_flag_remote = 1; //小陀螺模式单独置follow_flag
+
+        Gimbal_MotorYaw.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Speed,
+                Gimbal_MotorYaw.motor_value->speed_rpm,
+                Gimbal_MotorYaw.motor_value->target_speed_rpm);
+
+    }
+    if(PitchGimbalMode == USEENCODER) //纯编码器调PITCH轴
+    {
+        Gimbal_MotorPitch.motor_value->target_angle += (float)rc.ch2 / SENSITIVITY_REMOTE_GIMBAL_PITCH; //目标编码器角度
+        LimitValue_f(&(Gimbal_MotorPitch.motor_value->target_angle), GIMBAL_PITCH_ENCODER_MAX, GIMBAL_PITCH_ENCODER_MIN);
+
+        Gimbal_MotorPitch.Motor_PID_Position.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Position,
+                Gimbal_MotorPitch.motor_value->angle,
+                Gimbal_MotorPitch.motor_value->target_angle);
+
+        Gimbal_MotorPitch.motor_value->target_speed_rpm = Gimbal_MotorPitch.Motor_PID_Position.out; //位置环
+
+        Gimbal_MotorPitch.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Speed,
+                Gimbal_MotorPitch.motor_value->speed_rpm, //速度环
+                Gimbal_MotorPitch.motor_value->target_speed_rpm);
+    }
+    else if(PitchGimbalMode == USEIMU) //纯imu调PITCH轴
+    {
+        //目标值累加
+        if(actGimbal == GIMBAL_NORMAL)
+            Cloud_Angle_Target[PITCH][GYRO] -= (float)rc.ch2 / 1000;    //目标陀螺仪角度
+
+        //板载陀螺仪YAW轴位置环+电机速度环
+        LimitValue_f(&Cloud_Angle_Target[PITCH][GYRO], 15, -18);
+        Gimbal_MotorPitch.Motor_PID_Position.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Position, IMU_angle[1], Cloud_Angle_Target[PITCH][GYRO]);
+
+        Gimbal_MotorPitch.motor_value->target_speed_rpm = -Gimbal_MotorPitch.Motor_PID_Position.out;      //位置环输出
+
+        Gimbal_MotorPitch.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Speed,
+                Gimbal_MotorPitch.motor_value->speed_rpm,
+                Gimbal_MotorPitch.motor_value->target_speed_rpm);
+    }
+
+    set_moto5678_current(&hcan2, Gimbal_MotorPitch.Motor_PID_Speed.out, 0, 0, 0);  //加入CAN发送队列中
+    set_moto5678_current(&hcan1, Gimbal_MotorYaw.Motor_PID_Speed.out, Ammunition_Motor.Motor_PID_Speed.out, 0, 0);
+    //    set_moto5678_current(&hcan1, Gimbal_MotorYaw.Motor_PID_Speed.out, 0, 0, 0);
+    //    set_moto5678_current(&hcan2, 0, 0, 0, 0);  //加入CAN发送队列中
+    //    set_moto5678_current(&hcan1, 0, 0, 0, 0);
+}
+/**
+  * @brief  云台电机输出
+  * @param  void
+  * @retval void
+  * @attention
+  */
+static void GIMBAL_Double_Loop_Out()
+{
+    static uint32_t time;
+    static uint32_t lasttime;
+    static bool FLAG_Key = 1;
+    static bool follow_flag_key = 1;
+
+    if(MOUSE_X_MOVE_SPEED != 0)
+        FLAG_Key = 1;
+    else                                            //如果静止
+    {
+        if(FLAG_Key)                                     //如果是第一次
+        {
+            lasttime = xTaskGetTickCount();              //更新时间
+            time = xTaskGetTickCount();
+            FLAG_Key = 0;
+        }
+        else
+        {
+            time = xTaskGetTickCount();
+        }
+    }
+
+    if(YawGimbalMode == USEIMU )
+    {
+        AngleLoop_f(&Cloud_Angle_Target[YAW][GYRO], 360);
+
+        Gimbal_MotorYaw.Motor_PID_Position.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Position, IMU_angle[0], Cloud_Angle_Target[YAW][GYRO]);
+
+        Gimbal_MotorYaw.motor_value->target_speed_rpm = Gimbal_MotorYaw.Motor_PID_Position.out;
+
+        //零漂状态机 消除因陀螺仪漂移而导致的云台漂移
+        if((VisionValue.identify_target == '0' || actGimbal == GIMBAL_NORMAL) && MOUSE_X_MOVE_SPEED == 0 && actChassis != CHASSIS_GYROSCOPE) //如果不在自瞄模式
+        {
+            if(actChassis == CHASSIS_FOLLOW_GIMBAL)//单独处理跟随云台的情况
+            {
+                if(follow_flag_key)
+                {
+                    //更新lasttime
+                    lasttime = xTaskGetTickCount();
+                    follow_flag_key = 0;
+                }
+            }
+            else
+                follow_flag_key = 1;
+
+            if((time - lasttime) > 3000) //鼠标静止超过3秒 认为应当停止抖动
+            {
+                Gimbal_MotorYaw.motor_value->target_speed_rpm = 0;
+                gimbal_PID_clear(&Gimbal_MotorYaw.Motor_PID_Position);
+            }
+        }
+        if(actChassis == CHASSIS_GYROSCOPE) follow_flag_key = 1; //小陀螺模式单独置follow_flag
+
+        Gimbal_MotorYaw.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Speed,
+                Gimbal_MotorYaw.motor_value->speed_rpm,
+                Gimbal_MotorYaw.motor_value->target_speed_rpm);
+    }
+    else if(YawGimbalMode == USEENCODER)
+    {
+        Gimbal_MotorYaw.motor_value->target_angle = Cloud_Angle_Target[YAW][MECH];
+
+        AngleLoop_f(&(Gimbal_MotorYaw.motor_value->target_angle), 8192);
+
+        Gimbal_MotorYaw.Motor_PID_Position.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Position,
+                Gimbal_MotorYaw.motor_value->main_angle,
+                Gimbal_MotorYaw.motor_value->target_angle);
+
+        Gimbal_MotorYaw.motor_value->target_speed_rpm = Gimbal_MotorYaw.Motor_PID_Position.out; //位置环
+
+        Gimbal_MotorYaw.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Speed,
+                Gimbal_MotorYaw.motor_value->speed_rpm, //速度环
+                Gimbal_MotorYaw.motor_value->target_speed_rpm);
+    }
+
+    if(PitchGimbalMode == USEIMU)
+    {
+        LimitValue_f(&Cloud_Angle_Target[PITCH][GYRO], 15, -18);
+
+        Gimbal_MotorPitch.Motor_PID_Position.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Position, IMU_angle[1], Cloud_Angle_Target[PITCH][GYRO]);
+
+        Gimbal_MotorPitch.motor_value->target_speed_rpm = -Gimbal_MotorPitch.Motor_PID_Position.out ; //位置环
+
+        Gimbal_MotorPitch.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Speed,
+                Gimbal_MotorPitch.motor_value->speed_rpm, //速度环
+                Gimbal_MotorPitch.motor_value->target_speed_rpm);
+    }
+    else if(PitchGimbalMode == USEENCODER)
+    {
+        Gimbal_MotorPitch.motor_value->target_angle = Cloud_Angle_Target[PITCH][MECH];
+
+        LimitValue_f(&(Gimbal_MotorPitch.motor_value->target_angle), GIMBAL_PITCH_ENCODER_MAX, GIMBAL_PITCH_ENCODER_MIN);
+
+        Gimbal_MotorPitch.Motor_PID_Position.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Position,
+                Gimbal_MotorPitch.motor_value->angle,
+                Gimbal_MotorPitch.motor_value->target_angle);
+
+        Gimbal_MotorPitch.motor_value->target_speed_rpm = Gimbal_MotorPitch.Motor_PID_Position.out; //位置环
+
+        Gimbal_MotorPitch.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Speed,
+                Gimbal_MotorPitch.motor_value->speed_rpm, //速度环
+                Gimbal_MotorPitch.motor_value->target_speed_rpm);
+    }
+
+    set_moto5678_current(&hcan2, Gimbal_MotorPitch.Motor_PID_Speed.out, 0, 0, 0);  //加入CAN发送队列中
+    set_moto5678_current(&hcan1, Gimbal_MotorYaw.Motor_PID_Speed.out, Ammunition_Motor.Motor_PID_Speed.out, 0, 0);
+    /*can1底盘轮子1234 5YAW 6拨弹盘 78空
+    can2 1空 2摩擦轮l 3摩擦轮r 4空 5PITCH 678空*/
+    //    set_moto5678_current(&hcan2, 0, 0, 0, 0);
+    //    set_moto5678_current(&hcan1, 0, 0, 0, 0);
+}
+/**
+  * @brief  键盘控制云台模式
+  * @param  void
+  * @retval void
+  * @attention
+  */
+static portTickType ztime;
+static void GIMBAL_Key_Ctrl()
+{
+    switch(actGimbal)
+    {
+    /*--------------云台模式选择----------------*/
+    case GIMBAL_NORMAL:
+    {
+        ztime = 0;
+        kalman_filter_change_realtime();
+        vision_buff_package(0, 1);
+        HAL_UART_Transmit(&huart6, (uint8_t *)Vision_Send_Buff, 7, 0xffff);
+        if(ControlMode == KEYBOARD)
+            GIMBAL_CHASSIS_FOLLOW_Mode_Ctrl();
+        break;
+    }
+    /*--------------右键自瞄----------------*/
+    case GIMBAL_AUTO:
+    {
+        vision_buff_package(2, 1);
+        HAL_UART_Transmit(&huart6, (uint8_t *)Vision_Send_Buff, 7, 0xffff);
+        if(VisionValue.identify_target == '0')
+        {
+            ztime = 0;
+            followData.yawE[0] = 0;
+            followData.yawE[1] = 0;
+            followData.yawRate[0] = 0;
+            followData.yawRate[1] = 0;
+            followData.yawAcc[0] = 0;
+            if(ControlMode == KEYBOARD)
+                GIMBAL_CHASSIS_FOLLOW_Mode_Ctrl();
+        }
+        else if(VisionValue.identify_target == '1')
+        {
+            GIMBAL_AUTO_Mode_Ctrl();//自瞄控制函数
+        }
+        break;
+    }
+    //    /*--------------C键吊射----------------*/
+    default:
+        break;
+    }
+}
+
+static void kalman_filter_change_realtime(void)
+{
+    kalman_filter_calc(&yaw_kalman_filter, IMU_angle[0], 0.1, 0.01);
+    kalman_filter_calc(&pitch_kalman_filter, IMU_angle[1], 0.1, 0.01);
+    KalmanFilter(&follow_kalman_yaw, VisionValue.vision_yaw_value.value);
+    KalmanFilter(&follow_kalman_pitch, VisionValue.vision_pitch_value.value);
+}
+/**********************************************************************************/
+
+/**
+  * @brief  自瞄控制函数
+  * @param  void
+  * @retval void
+  * @attention 中间坐标(0,0),左正右负,上负下正
+  *            yaw为陀螺仪模式,pitch为机械模式(其实pitch全程都在用机械模式)
+  *            只有当新数据来了才在当前实时角度上累加误差当成目标角度
+  *            新数据一来,目标角度就实时更新
+  */
+
+static void GIMBAL_AUTO_Mode_Ctrl(void)
+{
+    static float yaw_target_angle = 0;
+    static float pit_target_angle = 0;
+    static float yaw_current_angle;
+    static float pitch_current_angle;
+
+    static float yTime = 0.35, pTime = 0.5;
+    static float yaw_gain = 0.8;//0.9;//45
+    static float pit_gain = 0.6;//10
+
+    if(VisionValue.identify_target == '1')
+    {
+        ztime++;
+    }
+
+    yaw_current_angle = IMU_angle[0];
+    yaw_target_angle = yaw_current_angle - KalmanFilter(&follow_kalman_yaw, VisionValue.vision_yaw_value.value) * yaw_gain;
+    AngleLoop_f(&yaw_target_angle, 360);
+
+    followData.yawE[1] = followData.yawE[0];
+    followData.yawE[0] = yaw_target_angle;
+
+    followData.yawRate[1] = followData.yawRate[0];
+    followData.yawRate[0] = (followData.yawE[0] - followData.yawE[1]) / yTime;
+
+    followData.yawAcc[0] = (followData.yawRate[0] - followData.yawRate[1]) / yTime;
+
+    yaw_kf_result = kalman_filter_calc(&yaw_kalman_filter, yaw_target_angle, followData.yawRate[0], followData.yawAcc[0]);
+
+    pitch_current_angle = IMU_angle[1];
+    //    pit_target_angle = pitch_current_angle + VisionValue.vision_pitch_value.value*pit_gain;
+
+    pit_target_angle = pitch_current_angle + KalmanFilter(&follow_kalman_pitch, VisionValue.vision_pitch_value.value) * pit_gain;
+
+    followData.pitchE[1] = followData.pitchE[0];
+    followData.pitchE[0] = pit_target_angle;
+
+    followData.pitchRate[1] = followData.pitchRate[0];
+    followData.pitchRate[0] = (followData.pitchE[0] - followData.pitchE[1]) / pTime;
+
+    followData.pitchAcc[0] = (followData.pitchRate[0] - followData.pitchRate[1]) / pTime;
+
+    pitch_kf_result = kalman_filter_calc(&pitch_kalman_filter, pit_target_angle, followData.pitchRate[0], followData.pitchAcc[0]);
+
+    if(ztime < 1000)
+    {
+        followData.yawOut = RAMP_float(yaw_kf_result[0], yaw_current_angle, 0.5);
+        followData.pitchOut = RAMP_float(pitch_kf_result[0], pitch_current_angle, 0.5);
+    }
+    else
+    {
+        followData.pitchOut = pitch_kf_result[0] + 0.1f * pitch_kf_result[1];
+        followData.yawOut = yaw_kf_result[0] + 0.1f * yaw_kf_result[1];
+    }
+    Cloud_Angle_Target[PITCH][GYRO] = followData.pitchOut;
+    Cloud_Angle_Target[YAW][GYRO] = followData.yawOut;
+}
+
+
+/***********************************************************************************下面的部分是键盘模式**********************************************************************************/
+/**
+  * @brief  机械 陀螺仪模式切换函数
+  * @param  void
+  * @retval void
+  * @attention 云台键盘控制状态下的所有模式切换都在这
+  * 无模式切换时一直处于此模式
+  */
+void GIMBAL_State_Change(GimbalModeType Type)
+{
+    if(Type == USEIMU)
+    {
+        if(YawGimbalMode == USEENCODER) //YAW轴必须采用陀螺仪模式的情况
+        {
+            Cloud_Angle_Target[YAW][GYRO] = IMU_angle[0];  //避免模式切换时云台乱转
+            Cloud_Angle_Target[PITCH][GYRO] = IMU_angle[1];
+            YawGimbalMode = USEIMU;
+        }
+    }
+    else if(Type == USEENCODER)
+    {
+        if(YawGimbalMode == USEIMU)
+        {
+            Cloud_Angle_Target[YAW][MECH]   = Gimbal_MotorYaw.motor_value  -> main_angle;   //得到当前角度//
+            Cloud_Angle_Target[PITCH][MECH] = Gimbal_MotorPitch.motor_value-> angle;
+            YawGimbalMode = USEENCODER;
+        }
+    }
+}
+
+void GIMBAL_State_Change_key(void)
+{
+    if(YawGimbalMode == USEENCODER && ((actGimbal == GIMBAL_AUTO) || (actGimbal == GIMBAL_NORMAL) ||
+                                       (actGimbal == GIMBAL_GYROSCOPE) || (actGimbal == GIMBAL_CHASSIS_FOLLOW))) //YAW轴必须采用陀螺仪模式的情况
+    {
+        Cloud_Angle_Target[YAW][GYRO] = IMU_angle[0];	//避免模式切换时云台乱转
+        YawGimbalMode = USEIMU;
+    }
+    else if(YawGimbalMode == USEIMU && ((actGimbal != GIMBAL_AUTO) && (actGimbal != GIMBAL_GYROSCOPE)
+                                        && (actGimbal != GIMBAL_NORMAL)))
+    {
+        Cloud_Angle_Target[YAW][MECH]   = Gimbal_MotorYaw.motor_value  -> main_angle;   //得到当前角度//
+        Cloud_Angle_Target[PITCH][MECH] = Gimbal_MotorPitch.motor_value-> angle;
+        YawGimbalMode = USEENCODER;
+    }
+}
+/**
+  * @brief  云台键盘模式选择,按键响应
+  * @param  void
+  * @retval void
+  * @attention 云台键盘控制状态下的所有模式切换都在这
+  * 无模式切换时一直处于此模式
+  */
+bool Gimbal_Switch_V = 1;
+bool Gimbal_Switch_Z = 1;
+static void GIMBAL_Mode_Choose(void)
+{
+    ////////////右键自瞄////////////////
+    if(IF_MOUSE_PRESSED_RIGH)
+    {
+        actGimbal = GIMBAL_AUTO;
+    }
+    //////////按V解除自瞄///////////////
+    if(!IF_KEY_PRESSED_V)
+    {
+        Gimbal_Switch_V = 1;
+    }
+    if(IF_KEY_PRESSED_V && Gimbal_Switch_V == 1)
+    {
+        Gimbal_Switch_V = 0;
+        actGimbal = GIMBAL_NORMAL;
+    }
+    if(!IF_KEY_PRESSED_Z)
+    {
+        Gimbal_Switch_Z = 1;
+    }
+    if(IF_KEY_PRESSED_Z && Gimbal_Switch_Z == 1)
+    {
+        Gimbal_Switch_Z = 0;
+        Stop_All();//电机停转
+        soft_rest(); //软件复位
+    }
+}
+
+
+/**
+  * @brief  底盘跟随云台函数
+  * @param  void
+  * @retval void
+  * @attention
+  */
+static void GIMBAL_CHASSIS_FOLLOW_Mode_Ctrl()
+{
+    static portTickType  Key_Ctrl_CurrentTime = 0;
+    static TickType_t Turn_Time[2] = {0};
+    static uint32_t Mouse_Pitch_Stop  = 0;//鼠标不动，结束响?
+    static uint32_t Mouse_Yaw_Stop  = 0;
+
+    static uint32_t QTurn90_ms  = 0;//90°,250ms延时响应,1秒最多按4下
+    static uint32_t ETurn90_ms  = 0;//90°,250ms延时响应,1秒最多按4下
+    static u8 Qturn90_f = 0;
+    static u8 Etrun90_f = 0;
+    static float TURN_LEFT_Gimbal_Thistime = 0;
+    static float TURN_RIGHT_Gimbal_Thistime = 0;
+    static float Mouse_Gyro_Yaw, Mouse_Gyro_Pitch;  //键盘陀螺仪模式下鼠标统计yaw偏移量,此值会自己缓慢减小,防止甩头过快
+
+    Key_Ctrl_CurrentTime = xTaskGetTickCount();//获取实时时间,用来做按键延时判断
+    //左右旋转时云台补偿
+    //底盘跟随云台时转90度部分
+    if(actChassis == CHASSIS_FOLLOW_GIMBAL && IF_KEY_PRESSED_Q && Key_Ctrl_CurrentTime > QTurn90_ms)
+    {
+        Turn_Time[NOW] = xTaskGetTickCount();//当前系统时间
+
+        QTurn90_ms = Key_Ctrl_CurrentTime + TIME_STAMP_500MS;//500ms延时防手贱狂按
+        TURN_LEFT_Gimbal_Thistime = Cloud_Angle_Target[YAW][GYRO];
+        TURN_LEFT_Gimbal_Thistime += 90;
+        AngleLoop_f(&TURN_LEFT_Gimbal_Thistime, 360);
+        Qturn90_f = 1;
+    }
+    else if(actChassis == CHASSIS_FOLLOW_GIMBAL && IF_KEY_PRESSED_E && Key_Ctrl_CurrentTime > ETurn90_ms)
+    {
+        Turn_Time[NOW] = xTaskGetTickCount();//当前系统时间
+
+        ETurn90_ms = Key_Ctrl_CurrentTime + TIME_STAMP_500MS;//500ms延时防手贱狂按
+        TURN_RIGHT_Gimbal_Thistime = Cloud_Angle_Target[YAW][GYRO];
+        TURN_RIGHT_Gimbal_Thistime -= 90;
+        AngleLoop_f(&TURN_RIGHT_Gimbal_Thistime, 360);
+        Etrun90_f = 1;
+    }
+
+    if(Key_Ctrl_CurrentTime - Turn_Time[NOW]  > TIME_STAMP_500MS)
+    {
+        Etrun90_f = 0;
+        Qturn90_f = 0;
+    }
+    else if(Qturn90_f)
+    {
+        if((TURN_LEFT_Gimbal_Thistime - Cloud_Angle_Target[YAW][GYRO]) >= 180)
+        {
+            Cloud_Angle_Target[YAW][GYRO] = RAMP_float( TURN_LEFT_Gimbal_Thistime, Cloud_Angle_Target[YAW][GYRO], -0.6 );
+        }
+        else
+        {
+            Cloud_Angle_Target[YAW][GYRO] = RAMP_float( TURN_LEFT_Gimbal_Thistime, Cloud_Angle_Target[YAW][GYRO], 0.6 );
+        }
+        Cloud_Angle_Target[PITCH][MECH] = GIMBAL_PITCH_ENCODER_MIDDLE;
+    }
+    else if(Etrun90_f)
+    {
+        if((TURN_RIGHT_Gimbal_Thistime - Cloud_Angle_Target[YAW][GYRO]) <= -180)
+        {
+            Cloud_Angle_Target[YAW][GYRO] = RAMP_float( TURN_RIGHT_Gimbal_Thistime, Cloud_Angle_Target[YAW][GYRO], -0.6 );
+        }
+        else
+        {
+            Cloud_Angle_Target[YAW][GYRO] = RAMP_float( TURN_RIGHT_Gimbal_Thistime, Cloud_Angle_Target[YAW][GYRO], 0.6 );
+        }
+        Cloud_Angle_Target[PITCH][MECH] = GIMBAL_PITCH_ENCODER_MIDDLE;
+    }
+    /////普通控制部分
+    if(Etrun90_f == 0 && Qturn90_f == 0)
+    {
+        if(MOUSE_X_MOVE_SPEED != 0)
+        {
+            Mouse_Gyro_Yaw -= MOUSE_X_MOVE_SPEED * 0.01;//yaw仍旧使用机械模式
+        }
+        else if(MOUSE_X_MOVE_SPEED != 0)
+        {
+            Mouse_Yaw_Stop ++ ;
+            if(Mouse_Yaw_Stop > 5) //鼠标长时间停留，停止移动
+            {
+                Mouse_Gyro_Yaw = RAMP_float(0, Mouse_Gyro_Yaw, 50);
+            }
+        }
+        else
+        {
+            Mouse_Gyro_Yaw = RAMP_float(0, Mouse_Gyro_Yaw, 50);
+        }
+        Cloud_Angle_Target[YAW][GYRO] = RampInc_float( &Mouse_Gyro_Yaw, Cloud_Angle_Target[YAW][GYRO], 10);
+        //AngleLoop_f(&Cloud_Angle_Target[YAW][GYRO], 360);
+
+        if(MOUSE_Y_MOVE_SPEED != 0)
+        {
+            Mouse_Gyro_Pitch -= MOUSE_Y_MOVE_SPEED * -0.01f;//pitch仍旧使用机械模式
+        }
+        else if(MOUSE_Y_MOVE_SPEED == 0)
+        {
+            Mouse_Pitch_Stop ++ ;
+            if(Mouse_Pitch_Stop > 5) //鼠标长时间停留，停止移动
+            {
+                Mouse_Gyro_Pitch = RAMP_float(0, Mouse_Gyro_Pitch, 50);
+            }
+        }
+        else
+        {
+            Mouse_Gyro_Pitch = RAMP_float(0, Mouse_Gyro_Pitch, 50);
+        }
+        Cloud_Angle_Target[PITCH][GYRO] = RampInc_float( &Mouse_Gyro_Pitch, Cloud_Angle_Target[PITCH][GYRO], 10);
+        //LimitValue_f(&Cloud_Angle_Target[PITCH][GYRO], 15, -18);
+    }
+}
+
+/**
+  * @brief  刚开机，使云台缓慢的移动到＋y平整位置
+  * @param  void
+  * @retval void
+  * @attention
+  */
+static void GimbalOpenInit(void)
+{
+    Gimbal_MotorPitch.Motor_PID_Speed.max_iout = 180;
+    Gimbal_MotorPitch.Motor_PID_Speed.max_out = 15000;
+    fp32 Yaw_angle = IMU_angle[0];
+    bool return_flag = true;
+    while(return_flag)
+    {
+        if(gimbal_return_finish_flag)
+        {
+            return_flag = false;
+        }
+
+        Gimbal_MotorPitch.Motor_PID_Position.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Position, IMU_angle[1], 0);//开头pitch轴抬到水平
+
+        Gimbal_MotorPitch.motor_value->target_speed_rpm = -Gimbal_MotorPitch.Motor_PID_Position.out; //位置环
+
+        Gimbal_MotorPitch.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorPitch.Motor_PID_Speed,
+                Gimbal_MotorPitch.motor_value->speed_rpm,
+                Gimbal_MotorPitch.motor_value->target_speed_rpm);
+
+        Gimbal_MotorYaw.Motor_PID_Position.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Position, IMU_angle[0], Yaw_angle);
+        
+        Gimbal_MotorYaw.motor_value->target_speed_rpm = Gimbal_MotorYaw.Motor_PID_Position.out; //位置环
+        
+        Gimbal_MotorYaw.Motor_PID_Speed.f_cal_pid(&Gimbal_MotorYaw.Motor_PID_Speed,
+                Gimbal_MotorYaw.motor_value->speed_rpm, //速度环
+                Gimbal_MotorYaw.motor_value->target_speed_rpm);
+
+        set_moto5678_current(&hcan2, Gimbal_MotorPitch.Motor_PID_Speed.out, 0, 0, 0);
+        set_moto5678_current(&hcan1, Gimbal_MotorYaw.Motor_PID_Speed.out, 0, 0, 0);
+        osDelay(1); //pid控制频率1000hz
+    }
+    Gimbal_MotorPitch.Motor_PID_Speed.max_iout = 500;
+    Gimbal_MotorPitch.Motor_PID_Speed.max_out = 25000;
+}
+
+
+///**
+//  * @brief  底盘不跟随云台函数
+//  * @param  void
+//  * @retval void
+//  * @attention
+//  */
+//void GIMBAL_NO_CHASSIS_FOLLOW_Mode_Ctrl()
+//{
+//  static uint32_t Mouse_Pitch_Stop  = 0;//鼠标不动，结束响?
+//  static uint32_t Mouse_Yaw_Stop  = 0;
+//  if (modeGimbal == CLOUD_GYRO_MODE)
+//  {
+//    if(MOUSE_X_MOVE_SPEED != 0)
+//    {
+//        Mouse_Gyro_Yaw -= MOUSE_X_MOVE_SPEED * 0.1;//pitch仍旧使用机械模式
+//    }
+//    else if(MOUSE_X_MOVE_SPEED != 0)
+//    {
+//      Mouse_Yaw_Stop ++ ;
+//      if(Mouse_Yaw_Stop > 25)//鼠标长时间停留，停止移动
+//      {
+//        Mouse_Gyro_Yaw = 0;
+//      }
+//    }
+//    else
+//    {
+//      Mouse_Gyro_Yaw = 0;
+//    }
+//    Cloud_Angle_Target[YAW][MECH] = RampInc_float( &Mouse_Gyro_Yaw, Cloud_Angle_Target[YAW][GYRO], Slope_Back_Yaw );
+
+
+//    if(MOUSE_Y_MOVE_SPEED != 0)
+//    {
+//      Mouse_Gyro_Pitch -= MOUSE_Y_MOVE_SPEED * -0.08f;//pitch仍旧使用机械模式
+//    }
+//    else if(MOUSE_Y_MOVE_SPEED == 0)
+//    {
+//      Mouse_Pitch_Stop ++ ;
+//      if(Mouse_Pitch_Stop > 25)//鼠标长时间停留，停止移动
+//      {
+//        Mouse_Gyro_Pitch = 0;
+//      }
+//    }
+//    else
+//    {
+//      Mouse_Pitch_Stop = 0;
+//    }
+//    Cloud_Angle_Target[PITCH][MECH] = RampInc_float( &Mouse_Gyro_Pitch, Cloud_Angle_Target[PITCH][MECH], Slope_Mouse_Pitch );
+//  }
+//}
+
+/**
+//  * @brief  小陀螺云台函数
+//  * @param  void
+//  * @retval void
+//  * @attention
+//  */
+//void GIMBAL_GYROSCOPE_Mode_Ctrl()
+//{
+//  static uint32_t Mouse_Yaw_Stop  = 0;
+//  static uint32_t Mouse_Pitch_Stop = 0;
+//  if (modeGimbal == CLOUD_GYRO_MODE)
+//  {
+//    if(MOUSE_X_MOVE_SPEED != 0)
+//    {
+//        Mouse_Gyro_Yaw -= MOUSE_X_MOVE_SPEED * 0.1*0.1;//pitch仍旧使用机械模式
+//    }
+//    else if(MOUSE_X_MOVE_SPEED != 0)
+//    {
+//      Mouse_Yaw_Stop ++ ;
+//      if(Mouse_Yaw_Stop > 25)//鼠标长时间停留，停止移动
+//      {
+//        Mouse_Gyro_Yaw = 0;
+//      }
+//    }
+//    else
+//    {
+//      Mouse_Gyro_Yaw = 0;
+//    }
+//    Cloud_Angle_Target[YAW][GYRO] =RampInc_float( &Mouse_Gyro_Yaw, Cloud_Angle_Target[YAW][GYRO], Slope_Back_Yaw );
+////    Cloud_Angle_Target[YAW][MECH] =RAMP_float( TURNMode_Yaw_Back_Total, Cloud_Angle_Target[YAW][GYRO], Slope_Back_Yaw );
+//  }
+//    if(MOUSE_Y_MOVE_SPEED != 0)
+//    {
+//      Mouse_Gyro_Pitch -= MOUSE_Y_MOVE_SPEED * -0.08f;//pitch仍旧使用机械模式
+//    }
+//    else if(MOUSE_Y_MOVE_SPEED == 0)
+//    {
+//      Mouse_Pitch_Stop ++ ;
+//      if(Mouse_Pitch_Stop > 25)//鼠标长时间停留，停止移动
+//      {
+//        Mouse_Gyro_Pitch = 0;
+//      }
+//    }
+//    else
+//    {
+//      Mouse_Pitch_Stop = 0;
+//    }
+//    Cloud_Angle_Target[PITCH][MECH] = RampInc_float( &Mouse_Gyro_Pitch, Cloud_Angle_Target[PITCH][MECH], Slope_Mouse_Pitch );
+//
+//}
+

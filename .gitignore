@@ -1,0 +1,12 @@
+hero_gimbal/MDK-ARM/hero_gimbal
+hero_gimbal/Middlewares
+hero_gimbal/Drivers
+
+hero_chassis/MDK-ARM/hero_chassis
+hero_chassis/Middlewares
+hero_chassis/Drivers
+
+hero_233-chassis-rc/MDK-ARM/hero_chassis
+hero_233-chassis-rc/Middlewares
+hero_233-chassis-rc/Drivers
+

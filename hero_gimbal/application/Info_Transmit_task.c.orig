@@ -1,0 +1,93 @@
+#include "Info_Transmit_task.h"
+#include "main.h"
+#include "tuxin.h"
+
+bool FLAG = 0;//Ä¦²ÁÂÖ
+//operate_type graphic_type layer color start_angle end_angle width start_x start_y radius end_x end_y
+//uint32_t Change_Data[7][12]={{add,oval,7,yellow,0,0,4,960,540,10,10,25},
+//                             {add,oval,8,yellow,0,0,4,960,200,10,10,25},
+//                             {add,circle,9,yellow,0,0,4,960,700,10,0,0}  };
+void Info_Transmit_task(void const *argument)
+{
+
+    for(int i=0; i<20; i++)
+        Line_of_sight(huart1);
+    while(1)
+    {
+            if(abs(mocalun_l.motor_value->target_speed_rpm) > 10)//Ä¦²ÁÂÖ
+            {
+                if(Change_Data[0][1]!=circle)
+                {
+                    delete1(Tx_buff,0,huart1);
+                    FLAG=0;
+                }
+                Change_Data[0][1]=circle;//Ô²
+            }
+            else
+            {
+                if(Change_Data[0][1]!=oval)
+                {
+                    delete1(Tx_buff,0,huart1);//É¾³ýËùÓÐ
+                    FLAG=0;
+                }
+                Change_Data[0][1]=oval;//ÍÖÔ²
+            }
+            /********************************************/
+            if(Ammunition_Motor.motor_value->target_speed_rpm > 3)//²¦µ¯ÅÌ
+            {
+                if(Change_Data[1][1]!=circle)
+                {
+                    delete1(Tx_buff,0,huart1);
+                    FLAG=0;
+                }
+                Change_Data[1][1]=circle;//Ô²
+            }
+            else
+            {
+                if(Change_Data[1][1]!=oval)
+                {
+                    delete1(Tx_buff,0,huart1);
+                    FLAG=0;
+                }
+                Change_Data[1][1]=oval;//ÍÖÔ²
+            }
+            /********************************************/
+            if(actChassis == CHASSIS_GYROSCOPE)//Ä£Ê½
+            {
+                if(Change_Data[2][3]!=yellow)
+                {
+                    delete1(Tx_buff,0,huart1);
+                    FLAG=0;
+                }
+                Change_Data[2][3]=yellow;//»ÆÉ«
+            }
+            else if(actChassis == CHASSIS_NORMAL)
+            {
+                if(Change_Data[2][3]!=white)
+                {
+                    delete1(Tx_buff,0,huart1);
+                    FLAG=0;
+                }
+                Change_Data[2][3]=white;//°×É«
+            }
+            else
+            {
+                if(Change_Data[2][3]!=black)
+                {
+                    delete1(Tx_buff,0,huart1);
+                    FLAG=0;
+                }
+                Change_Data[2][3]=black;//ºÚÉ«
+            }
+            /********************************************/
+            if(!FLAG)
+            {
+                Line_of_sight(huart1);
+                FLAG=1;
+            }
+            vTaskDelay(TIME_STAMP_100MS); //10hz
+        }
+}
+
+
+

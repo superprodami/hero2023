@@ -1,0 +1,261 @@
+/**
+  ******************************************************************************
+  * @file    tuxin.c
+  * @brief   图传界面画图用于显示状态、辅助瞄准。
+  * @author  CHY         
+  ******************************************************************************
+  * @attention
+  *
+  * 2021.3 设计大致完成。
+  * 2021.4.11 暂时还显示不了字符，只能显示图形。已经实现了图形根据车的某些状态进行动态的变化。
+  * 暂时还不知道为什么会有这么诡异的事。
+  *
+  * 
+  * 
+  *
+  ******************************************************************************
+  */
+#include "judge.h"
+#include "tuxin.h"
+#include "crc.h"
+#include "string.h"
+
+judge_show_data_t show_data = {0};
+uint8_t Tx_buff[5][50] = {0};
+uint8_t Tx_buff_seven[5][200] = {0};
+
+//绘图段显示数据
+void draw_a_cricle(uint8_t (*txbuff)[50], uint8_t i, int x, int y, uint8_t Operate_type, UART_HandleTypeDef UART)
+{
+    uint32_t length = 0;
+
+    //按要求帖齑帧头
+    length = sizeof(show_data.frame_header) + sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_single.grapic_data_struct) + sizeof(show_data.cmd_id) + sizeof(show_data.frame_tail);
+    show_data.frame_header.SOF = Judge_Data_SOF;
+    show_data.frame_header.Data_Length = sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_single.grapic_data_struct);
+    show_data.frame_header.Seq = 0;
+    memcpy(txbuff + i, &show_data.frame_header, LEN_HEADER);
+    Append_CRC8_Check_Sum(*(txbuff + i), LEN_HEADER);
+    //发送时低八位在前
+    show_data.cmd_id = 0x0301;
+    memcpy(txbuff[i] + CMD_ID, &show_data.cmd_id, LEN_CMDID);
+    show_data.student_interactive_header.data_cmd_id = client_custom_graphic_single_id;
+    show_data.student_interactive_header.sender_ID = Judge_Self_ID;
+    show_data.student_interactive_header.receiver_ID = choose_client(Judge_Self_ID);
+    memcpy(txbuff[i] + STU_HEADER, &show_data.student_interactive_header, LEN_STU_HEAD);
+    show_data.operate_data.show_single.grapic_data_struct.graphic_name[0] = 'r';
+    show_data.operate_data.show_single.grapic_data_struct.graphic_name[1] = 'o';
+    show_data.operate_data.show_single.grapic_data_struct.graphic_name[2] = 'd';
+    show_data.operate_data.show_single.grapic_data_struct.operate_type = Operate_type;//图形操作
+    show_data.operate_data.show_single.grapic_data_struct.graphic_type = circle;
+    show_data.operate_data.show_single.grapic_data_struct.layer = i;//图层
+    show_data.operate_data.show_single.grapic_data_struct.color = 1;
+    show_data.operate_data.show_single.grapic_data_struct.width = 5;//线条宽度
+    show_data.operate_data.show_single.grapic_data_struct.start_x = x;
+    show_data.operate_data.show_single.grapic_data_struct.start_y =	y;
+    show_data.operate_data.show_single.grapic_data_struct.radius = 30;//半径
+
+    memcpy(txbuff[i] + STU_DATA, &show_data.operate_data.show_single.grapic_data_struct, LEN_SINGLE_GRAPH);
+    Append_CRC16_Check_Sum(*(txbuff + i), length);
+    HAL_UART_Transmit(&UART, *(txbuff + i), length,5);
+    memset(txbuff + i, 0, 50);
+}
+
+void delete1(uint8_t (*txbuff)[50],uint8_t i, UART_HandleTypeDef UART)
+{
+    uint32_t length = 0;
+    //按要求帖齑帧头
+    length = sizeof(show_data.frame_header) + sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_single.grapic_data_struct) + sizeof(show_data.cmd_id) + sizeof(show_data.frame_tail);
+    show_data.frame_header.SOF = Judge_Data_SOF;
+    show_data.frame_header.Data_Length = sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_single.grapic_data_struct);
+    show_data.frame_header.Seq = 0;
+    memcpy(txbuff + i, &show_data.frame_header, LEN_HEADER);
+    Append_CRC8_Check_Sum(*(txbuff + i), LEN_HEADER);
+    //发送时低八位在前
+    show_data.cmd_id = 0x0301;
+    memcpy(txbuff[i] + CMD_ID, &show_data.cmd_id, LEN_CMDID);
+    show_data.student_interactive_header.data_cmd_id = client_custom_graphic_delete_id;
+    show_data.student_interactive_header.sender_ID = Judge_Self_ID;
+    show_data.student_interactive_header.receiver_ID = choose_client(Judge_Self_ID);
+    memcpy(txbuff[i] + STU_HEADER, &show_data.student_interactive_header, LEN_STU_HEAD);
+
+    show_data.operate_data.client_custom_graphic_delete.operate_type = 2;
+    show_data.operate_data.client_custom_graphic_delete.layer=9;
+
+    memcpy(txbuff[i] + STU_DATA, &show_data.operate_data.client_custom_graphic_delete, 2);
+    Append_CRC16_Check_Sum(*(txbuff + i), length);
+    HAL_UART_Transmit(&UART, *(txbuff + i), length,50);
+    memset(txbuff + i, 0, 50);
+}
+
+void draw_a_line(uint8_t (*txbuff)[50], uint8_t i, int Start_x, int Start_y, int End_x, int End_y, uint8_t Operate_type, UART_HandleTypeDef UART)
+{
+    uint32_t length = 0;
+    //按要求帖齑帧头
+    length = sizeof(show_data.frame_header) + sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_single.grapic_data_struct) + sizeof(show_data.cmd_id) + sizeof(show_data.frame_tail);
+    show_data.frame_header.SOF = Judge_Data_SOF;
+    show_data.frame_header.Data_Length = sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_single.grapic_data_struct);
+    show_data.frame_header.Seq = 0;
+    memcpy(txbuff + i, &show_data.frame_header, LEN_HEADER);
+    Append_CRC8_Check_Sum(*(txbuff + i), LEN_HEADER);
+    //发送时低八位在前
+    show_data.cmd_id = 0x0301;
+    memcpy(txbuff[i] + CMD_ID, &show_data.cmd_id, LEN_CMDID);
+    show_data.student_interactive_header.data_cmd_id = client_custom_graphic_single_id;
+    show_data.student_interactive_header.sender_ID = Judge_Self_ID;
+    show_data.student_interactive_header.receiver_ID = choose_client(Judge_Self_ID);
+    memcpy(txbuff[i] + STU_HEADER, &show_data.student_interactive_header, LEN_STU_HEAD);
+    show_data.operate_data.show_single.grapic_data_struct.graphic_name[0] = 'r';
+    show_data.operate_data.show_single.grapic_data_struct.graphic_name[1] = 'o';
+    show_data.operate_data.show_single.grapic_data_struct.graphic_name[2] = 'd';
+    show_data.operate_data.show_single.grapic_data_struct.operate_type = Operate_type;//图形操讈E
+    show_data.operate_data.show_single.grapic_data_struct.graphic_type = straight_line;
+    show_data.operate_data.show_single.grapic_data_struct.layer = i;//图瞾E
+    show_data.operate_data.show_single.grapic_data_struct.color = 1;//1黄色
+    show_data.operate_data.show_single.grapic_data_struct.width = 5;//线条窥胰
+    show_data.operate_data.show_single.grapic_data_struct.start_x = Start_x;
+    show_data.operate_data.show_single.grapic_data_struct.start_y =	Start_y;
+    show_data.operate_data.show_single.grapic_data_struct.end_x = End_x;//10;//皝E?
+    show_data.operate_data.show_single.grapic_data_struct.end_y = End_y;//10;//
+
+    memcpy(txbuff[i] + STU_DATA, &show_data.operate_data.show_single.grapic_data_struct, LEN_SINGLE_GRAPH);
+    Append_CRC16_Check_Sum(*(txbuff + i), length);
+    HAL_UART_Transmit(&UART, *(txbuff + i), length,5);
+    memset(txbuff + i, 0, 50);
+}
+
+void draw_a_string(uint8_t (*txbuff)[50], uint8_t i, uint8_t str[], uint8_t len, uint16_t start_x, uint16_t start_y, uint8_t Operate_type, UART_HandleTypeDef UART)
+{
+     uint32_t length = 0;
+    //按要求填写帧头
+    length = sizeof(show_data.frame_header) + sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_single.grapic_data_struct) + 30 + sizeof(show_data.cmd_id) + sizeof(show_data.frame_tail);
+    show_data.frame_header.SOF = Judge_Data_SOF;
+    show_data.frame_header.Data_Length = sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_char);
+    show_data.frame_header.Seq = 0;
+    memcpy(txbuff + i, &show_data.frame_header, LEN_HEADER);
+    Append_CRC8_Check_Sum(*(txbuff + i), LEN_HEADER);
+
+    show_data.cmd_id = 0x0301;
+    memcpy(txbuff[i] + CMD_ID, &show_data.cmd_id, LEN_CMDID);
+    show_data.student_interactive_header.data_cmd_id = client_custom_character_id;
+    show_data.student_interactive_header.sender_ID = Judge_Self_ID;//当前机器人id;
+    show_data.student_interactive_header.receiver_ID = choose_client(Judge_Self_ID);//该机器人对应的客户端id
+    memcpy(txbuff[i] + STU_HEADER, &show_data.student_interactive_header, LEN_STU_HEAD);
+    show_data.operate_data.show_char.grapic_data_struct.graphic_name[0] = 's';
+    show_data.operate_data.show_char.grapic_data_struct.graphic_name[1] = 't';
+    show_data.operate_data.show_char.grapic_data_struct.graphic_name[2] = 'r';
+    show_data.operate_data.show_char.grapic_data_struct.operate_type = Operate_type;
+    show_data.operate_data.show_char.grapic_data_struct.graphic_type = string;//7是字符
+    show_data.operate_data.show_char.grapic_data_struct.layer = i;
+    show_data.operate_data.show_char.grapic_data_struct.color = white;
+    show_data.operate_data.show_char.grapic_data_struct.start_angle = 30;	//字体大小
+    show_data.operate_data.show_char.grapic_data_struct.end_angle = len;	//字体长度
+    show_data.operate_data.show_char.grapic_data_struct.width = 3;
+    show_data.operate_data.show_char.grapic_data_struct.start_x = start_x;
+    show_data.operate_data.show_char.grapic_data_struct.start_y = start_y;
+
+    for(int y = 0; y < len; y++)
+    {
+        //show_data.operate_data.show_char.data[y] = str[y];
+        memcpy(&show_data.operate_data.show_char.data[y], str+y, 1);
+    }
+
+    memcpy(txbuff[i] + STU_DATA, &show_data.operate_data.show_char.grapic_data_struct, LEN_SINGLE_GRAPH + 30);
+    Append_CRC16_Check_Sum(*(txbuff + i), length);
+    HAL_UART_Transmit(&UART, *(txbuff + i), length,0xffff);
+    memset(txbuff + i, 0, 50);
+}
+
+void draw_seven_line(uint8_t (*txbuff)[200], uint8_t i, UART_HandleTypeDef UART, uint32_t (*Data)[12])
+{
+     uint32_t length = 0;
+    //按要求帖齑帧头
+    length = sizeof(show_data.frame_header) + sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_seven.grapic_data_struct) + sizeof(show_data.cmd_id) + sizeof(show_data.frame_tail);
+    show_data.frame_header.SOF = Judge_Data_SOF;
+    show_data.frame_header.Data_Length = sizeof(show_data.student_interactive_header) + sizeof(show_data.operate_data.show_seven.grapic_data_struct);
+    show_data.frame_header.Seq = 0;
+    memcpy(txbuff + i, &show_data.frame_header, LEN_HEADER);
+    Append_CRC8_Check_Sum(*(txbuff + i), LEN_HEADER);
+    //发送时低八位在前
+    show_data.cmd_id = 0x0301;
+    memcpy(txbuff[i] + CMD_ID, &show_data.cmd_id, LEN_CMDID);
+    show_data.student_interactive_header.data_cmd_id = client_custom_graphic_seven_id;
+    show_data.student_interactive_header.sender_ID = Judge_Self_ID;
+    show_data.student_interactive_header.receiver_ID = choose_client(Judge_Self_ID);
+    memcpy(txbuff[i] + STU_HEADER, &show_data.student_interactive_header, LEN_STU_HEAD);
+    for(int j = 0; j < 7; j++)
+    {
+        show_data.operate_data.show_seven.grapic_data_struct[j].graphic_name[0] = 'm';
+        show_data.operate_data.show_seven.grapic_data_struct[j].graphic_name[1] = 'a';
+        show_data.operate_data.show_seven.grapic_data_struct[j].graphic_name[2] = 'p';
+        show_data.operate_data.show_seven.grapic_data_struct[j].operate_type = *(Data[j]+0);//Operate_type;//图形操讈E
+        show_data.operate_data.show_seven.grapic_data_struct[j].graphic_type = *(Data[j]+1);//;//图形类型
+        show_data.operate_data.show_seven.grapic_data_struct[j].layer = *(Data[j]+2);//5;//图瞾E
+        show_data.operate_data.show_seven.grapic_data_struct[j].color = *(Data[j]+3);//1;//颜色
+        show_data.operate_data.show_seven.grapic_data_struct[j].start_angle = *(Data[j]+4);//10;//
+        show_data.operate_data.show_seven.grapic_data_struct[j].end_angle = *(Data[j]+5);//10;//
+        show_data.operate_data.show_seven.grapic_data_struct[j].width = *(Data[j]+6);//10;//线条窥胰
+        show_data.operate_data.show_seven.grapic_data_struct[j].start_x = *(Data[j]+7);//x;
+        show_data.operate_data.show_seven.grapic_data_struct[j].start_y =	*(Data[j]+8);//y;
+        show_data.operate_data.show_seven.grapic_data_struct[j].radius = *(Data[j]+9);//10;//皝E?
+        show_data.operate_data.show_seven.grapic_data_struct[j].end_x = *(Data[j]+10);//10;//皝E?
+        show_data.operate_data.show_seven.grapic_data_struct[j].end_y = *(Data[j]+11);//10;//皝E?
+    }
+
+    //show_single
+    memcpy(txbuff[i] + STU_DATA, &show_data.operate_data.show_seven.grapic_data_struct, LEN_SEVEN_GRAPH);
+    Append_CRC16_Check_Sum(*(txbuff + i), length);
+    HAL_UART_Transmit(&UART, *(txbuff + i), length,50);
+    memset(txbuff + i, 0, 200);
+}
+
+uint32_t Change_Data[7][12]={{add,oval,7,yellow,0,0,4,960,540,10,10,25},
+                             {add,oval,8,yellow,0,0,4,960,200,10,10,25},
+                             {add,circle,9,black,0,0,4,960,700,10,0,0}  };
+void Line_of_sight(UART_HandleTypeDef UART)
+{
+    //uint8_t str1[15] = {"60"};
+    uint32_t Data[7][12]= {{add,straight_line,0,white,0,0,4,960,520,0,960,300},
+                           {add,straight_line,1,white,0,0,4,760,500,0,1160,500},
+                           {add,straight_line,2,white,0,0,4,860,460,0,1060,460},
+                           {add,straight_line,3,yellow,0,0,4,860,420,0,1060,420},
+                           {add,straight_line,4,yellow,0,0,4,860,380,0,1060,380},
+                           {add,straight_line,5,yellow,0,0,4,860,340,0,1060,340},
+                           {add,straight_line,6,yellow,0,0,4,760,300,0,1160,300}
+  };
+    draw_seven_line(Tx_buff_seven,0,UART,Data);
+    draw_seven_line(Tx_buff_seven,1,huart1,Change_Data);
+    //draw_a_string(Tx_buff, 1, str1, 2, 960, 540, add, UART);
+}
+
+
+//bool Flag_moca=1;//摩擦轮
+//bool Flag_bodan=1;//拨弹盘
+//void shoot_show(UART_HandleTypeDef UART)
+//{
+//    uint8_t str1[15] = {"60"};
+//    draw_a_string(Tx_buff, 1, str1, 2, 960, 540, modify, UART);
+//    if(abs(mocalun_l.motor_value->target_speed_rpm) > 10)
+//    {
+//        if(Flag_moca)
+//        {
+//            delete1(Tx_buff,0,UART);
+////      if(abs(Ammunition_Motor.motor_value->target_speed_rpm) > 5)
+////        draw_a_string(Tx_buff, 4, str1, 15, 960, 800, 1, UART);
+//            draw_a_cricle(Tx_buff, 1, 960, 540, 1, UART);
+//            Line_of_sight(UART);
+//            Flag_moca=0;
+//        }
+//    }
+//    else
+//    {
+//        if(!Flag_moca)
+//        {
+//            delete1(Tx_buff,0,UART);
+//            Line_of_sight(UART);
+//            draw_a_cricle(Tx_buff, 1, 960, 640, 1, UART);
+//            Flag_moca=1;
+//        }
+//    }
+//}
+
